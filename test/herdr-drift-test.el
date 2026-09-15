@@ -26,6 +26,18 @@
   "Return non-nil when a herdr server is reachable."
   (condition-case nil (progn (herdr-rpc-call "ping") t) (herdr-error nil)))
 
+(defun herdr-drift-test--ensure-pane ()
+  "Create a workspace if the session has no panes.
+A fresh `herdr server' starts empty; `pane.split' with no target then
+fails with `pane_not_found'.  The TUI would have created a default
+workspace; the live suite talks to the socket directly, so it seeds
+one itself."
+  (unless (alist-get 'panes (herdr-rpc-call "pane.list"))
+    (herdr-rpc-call "workspace.create"
+                    `((cwd . ,(expand-file-name temporary-file-directory))
+                      (label . "herdr-el-live")
+                      (focus . t)))))
+
 (defmacro herdr-drift-test-with-server (&rest body)
   "Run BODY, skipping the test when no herdr server is running."
   (declare (indent 0) (debug t))
@@ -81,6 +93,7 @@
   "Split, rename, run, read back, close — and restore what we found."
   :tags '(:live)
   (skip-unless (herdr-drift-test--server-p))
+  (herdr-drift-test--ensure-pane)
   (let* ((before (alist-get 'panes
                             (alist-get 'snapshot
                                        (herdr-rpc-call "session.snapshot"))))
@@ -115,6 +128,7 @@
   "A change made over RPC must reach the cache through the event stream."
   :tags '(:live)
   (skip-unless (herdr-drift-test--server-p))
+  (herdr-drift-test--ensure-pane)
   (herdr-state-stop)
   (unwind-protect
       (progn
