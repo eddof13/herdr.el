@@ -29,10 +29,10 @@
 (ert-deftest herdr-rpc-call-returns-parsed-result ()
   (herdr-test-with-server
       (lambda (req)
-        (cons (herdr-test-ok req '((type . "pong") (protocol . 17))) nil))
+        (cons (herdr-test-ok req '((type . "pong") (protocol . 22))) nil))
     (let ((result (herdr-rpc-call "ping")))
       (should (equal (alist-get 'type result) "pong"))
-      (should (equal (alist-get 'protocol result) 17)))))
+      (should (equal (alist-get 'protocol result) 22)))))
 
 (ert-deftest herdr-rpc-call-passes-params-through ()
   (let (seen)

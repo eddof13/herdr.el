@@ -6,7 +6,7 @@
 ;; test' skips them and `make test-live' runs them.
 ;;
 ;; The point is drift.  Every curated command is hand-written against a
-;; method signature, and herdr is at 0.8.x — signatures will move.  When
+;; method signature, and herdr is at 0.9.x — signatures will move.  When
 ;; they do, this fails with the offending command named, instead of a
 ;; user finding out through a not_found at the wrong moment.
 ;;

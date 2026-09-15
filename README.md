@@ -42,7 +42,7 @@ ideas. Asserted by tests, not just by review.
 ## Requirements
 
 - Emacs 28.1+
-- [herdr](https://herdr.dev) 0.8.0 (protocol 19)
+- [herdr](https://herdr.dev) 0.9.0 (protocol 22)
 - `ghostel`, `transient`
 
 Optional, used when present, never required: `marginalia`, `embark`, `consult`, `alert`.
@@ -154,32 +154,34 @@ non-agent panes at all — so there is no "plain shell" row for it to be instead
 
 ## What was measured
 
-The design rests on behaviour probed from a live herdr 0.8.0 rather than from documentation.
+The design rests on behaviour probed from a live herdr rather than from documentation.
 Recorded here because most of it is not written down anywhere else.
 
 | Behaviour | Finding |
 |---|---|
 | RPC connections | **One request per connection.** The server writes one response, then closes. No multiplexing, no id correlation. |
 | `events.subscribe` | The one long-lived call. Acks `subscription_started`, then streams. |
-| **Subscribe replays history** | Subscribing to an *idle* server returned **54 past events**; a real startup produced about 150. The cache is primed silently and listeners are notified once. |
+| **Subscribe does not replay** | Lifecycle subscriptions start live. Clients subscribe first, wait for the ack, buffer, take `session.snapshot`, install it, then apply the buffer. Snapshot-then-subscribe misses the gap. |
 | **`pane_updated` coalesces** | Driving a pane through working → blocked → idle produced **3** per-pane events but only **1** `pane_updated`. Global events alone silently lose status transitions, so per-pane `pane.agent_status_changed` subscriptions are required. |
 | Throughput | Not a concern for either backend. A **12.2 MB** pane dump reached Emacs as **17 KB** (`session`) / **24 KB** (`agent-windows`), completing in 0.2s. herdr's VT only emits visible-frame diffs. |
 | `agent attach` | Streams one pane full-screen; coexists with a session client; **exclusive per pane**; refuses panes without a detected agent. |
 | Attach needs a window | The client needs a window when it starts and dies if that window is *deleted*; being merely hidden is fine, so a buried terminal keeps running with its scrollback. A zero-sized PTY renders nothing. |
-| **Replay leaves ghosts** | Priming ends after a fixed quiet period, so a bursty replay can end it early and later `pane_created` events resurrect long-closed panes. Nothing removes them afterwards, so the pane set is reconciled against `pane.list` on a poll. |
+| **Cache can still drift** | A disconnect gap, or a `cd` that never emits `pane_updated`, leaves the cache wrong. The pane set is reconciled against `pane.list` on a poll. |
 | **Adoption outranks detection** | `pane.report_agent` takes lifecycle authority, so an adopted pane keeps its label even once a real agent starts in it. `agent.explain` still reports what the detector concluded, which is what promotion reads. Releasing authority does *not* restore detection — it binds at agent start and does not re-run. |
-| Focus is shared | One focused pane per session, not per client. Navigating in Emacs moves the focus in any attached TUI too. |
+| Focus | `pane.focus` sets the session's focused pane. Viewing clients can present different workspaces and tabs independently; `pane.focused` reports a selection without moving other clients' views. |
 | OSC | **Not** forwarded — herdr's VT consumes OSC 7 and OSC 133. Beware the false positive: sending the escapes inline makes the shell echo the command text, which contains the same characters. |
 | cwd tracking | herdr tracks it **itself** — `pane.cwd` follows a `cd` within about a second. But it publishes **no event** for it: a `cd` emits only `layout_updated` noise, so directory tracking has to poll (debounced off the event stream, with a slow backstop timer). |
 | Shell panes | `pane.report_agent` makes a plain shell pane attachable, which is how adoption works. |
-| `pane.read` shape | Text is nested under a `read` object, not a top-level field. |
+| `pane.read` shape | Text is nested under a `read` object, not a top-level field. Recent reads include output still in the viewport. |
+| `workspace.close` | Closing a primary workspace that still has linked worktree workspaces requires `close_group: true`, otherwise the group stays open (`workspace_group_close_required`). |
+| `WorkspaceInfo` | Has no cwd. A worktree workspace is identified by `worktree.checkout_path`; any other workspace is identified by its panes' cwd. |
 | JSON arrays | Emacs's `json-serialize` cannot distinguish a list of alists from one alist. Array parameters must be vectors or `events.subscribe` is rejected. |
 
 ## Commands
 
 34 curated commands cover the methods worth a keybinding; `M-x herdr-call` reaches all
-**89**, prompting for each parameter from the server's own schema. Nothing is out of reach and
-there is no generated 89-entry menu.
+**103**, prompting for each parameter from the server's own schema. Nothing is out of reach and
+there is no generated 103-entry menu.
 
 Worth knowing about:
 
@@ -188,6 +190,9 @@ Worth knowing about:
   free pane is never a dead end.
 - **`herdr-worktree-create`** — herdr has native git-worktree support, so one command takes a
   branch name to a worktree with its own herdr workspace.
+- **`herdr-workspace-close`** — closing a primary workspace that still has linked worktree
+  workspaces open asks whether to close the group (`close_group`); without that the group stays
+  open.
 - **`herdr-pane-read`** / **`herdr-agent-read`** — terminal output into a real Emacs buffer.
   `recent_unwrapped` undoes terminal line-wrapping, which is what makes the result greppable.
 - **`herdr-agent-wait`** and **`herdr-pane-wait-for-output`** — asynchronous, so Emacs stays

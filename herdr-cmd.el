@@ -10,7 +10,7 @@
 ;;; Commentary:
 
 ;; Hand-written wrappers for the methods worth a keybinding.  herdr
-;; exposes 89; generating all of them would produce a menu nobody can
+;; exposes 103; generating all of them would produce a menu nobody can
 ;; read and prompts that cannot know a pane id should default to the
 ;; focused pane.  Everything not wrapped here stays reachable through
 ;; `herdr-call'.
@@ -47,7 +47,7 @@
     (herdr-tab-focus             "tab.focus"            "tab_id")
     (herdr-tab-rename            "tab.rename"           "tab_id" "label")
     (herdr-workspace-create      "workspace.create"     "cwd" "label" "focus")
-    (herdr-workspace-close       "workspace.close"      "workspace_id")
+    (herdr-workspace-close       "workspace.close"      "workspace_id" "close_group")
     (herdr-workspace-focus       "workspace.focus"      "workspace_id")
     (herdr-workspace-rename      "workspace.rename"     "workspace_id" "label")
     (herdr-worktree-list         "worktree.list"        "cwd")
@@ -379,14 +379,34 @@ TIMEOUT is in seconds.  PATTERN is treated as a regular expression."
                       (focus . t))))))
 
 (defun herdr-workspace-close (&optional workspace-id)
-  "Close WORKSPACE-ID, prompting when not given."
+  "Close WORKSPACE-ID, prompting when not given.
+
+Closing a primary workspace that still has linked worktree workspaces
+requires explicit group intent.  herdr returns
+`workspace_group_close_required' unless `close_group' is set; this
+command offers that rather than leaving the error on the user."
   (interactive)
   (let ((workspace (or workspace-id (herdr-select-workspace "Close workspace: "))))
-    (if (y-or-n-p (format "Close workspace %s? " workspace))
-        (progn
-          (herdr-rpc-call "workspace.close" `((workspace_id . ,workspace)))
-          (message "herdr: closed workspace %s" workspace))
-      (message "herdr: workspace %s left open" workspace))))
+    (cond
+     ((not (y-or-n-p (format "Close workspace %s? " workspace)))
+      (message "herdr: workspace %s left open" workspace))
+     (t
+      (condition-case err
+          (progn
+            (herdr-rpc-call "workspace.close" `((workspace_id . ,workspace)))
+            (message "herdr: closed workspace %s" workspace))
+        (herdr-error
+         (if (not (equal (herdr-error-code err) "workspace_group_close_required"))
+             (signal (car err) (cdr err))
+           (if (y-or-n-p
+                (format "Workspace %s has linked worktrees. Close the whole group? "
+                        workspace))
+               (progn
+                 (herdr-rpc-call "workspace.close"
+                                 `((workspace_id . ,workspace)
+                                   (close_group . t)))
+                 (message "herdr: closed workspace group %s" workspace))
+             (message "herdr: workspace %s left open" workspace)))))))))
 
 (defun herdr-workspace-focus (&optional workspace-id)
   "Focus WORKSPACE-ID, prompting when not given, and follow it in Emacs."
@@ -456,7 +476,8 @@ name to a worktree with its own herdr workspace."
 (defcustom herdr-agent-kinds
   '("pi" "claude" "codex" "gemini" "cursor" "devin" "agy" "cline"
     "omp" "mastracode" "opencode" "copilot" "kimi" "kiro" "droid"
-    "amp" "grok" "hermes" "kilo" "qodercli" "maki")
+    "amp" "grok" "hermes" "kilo" "qodercli" "maki" "muse" "qwen"
+    "letta")
   "Known agent kinds offered when starting an agent.
 Completion candidates only, not a closed set: herdr types
 `agent.start''s `kind' parameter as a free string rather than an enum,
@@ -529,8 +550,11 @@ full session is no longer a dead end."
   (let ((pane (or pane-id (herdr-select-available-shell))))
     (when (eq pane :create-new)
       (setq pane (herdr-cmd--split-new-shell)))
-    (herdr-rpc-call "agent.start"
-                    `((pane_id . ,pane) (name . ,name) (kind . ,kind)))
+    ;; The server waits up to 30s for the pane shell and first-run
+    ;; prompt to become ready; the default RPC timeout is shorter.
+    (let ((herdr-rpc-timeout (max herdr-rpc-timeout 35.0)))
+      (herdr-rpc-call "agent.start"
+                      `((pane_id . ,pane) (name . ,name) (kind . ,kind))))
     ;; Surface the agent that was just started.  Focusing is server-side,
     ;; so under `session' the TUI repaints to it; under `agent-windows'
     ;; the pane only just gained an agent, so its buffer is built off the

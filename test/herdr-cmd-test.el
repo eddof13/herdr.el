@@ -14,7 +14,7 @@
 (require 'herdr-schema)
 
 (defvar herdr-cmd-test--fixture
-  (expand-file-name "fixtures/schema-protocol-17.json"
+  (expand-file-name "fixtures/schema-protocol-22.json"
                     (file-name-directory (or load-file-name buffer-file-name))))
 
 (defmacro herdr-cmd-test-with-schema (&rest body)
@@ -74,7 +74,7 @@
   (should (equal "" (herdr-cmd-read-text '((type . "pane_read"))))))
 
 (ert-deftest herdr-cmd-read-truncated-reads-the-envelope-flag ()
-  "herdr 0.8.0 flags dropped rows as `truncated' on the read envelope."
+  "herdr flags dropped rows as `truncated' on the read envelope."
   (should (herdr-cmd-read-truncated-p
            '((type . "pane_read") (read . ((text . "x") (truncated . t))))))
   ;; Tolerate the flag arriving flat, mirroring `herdr-cmd-read-text'.
@@ -246,6 +246,48 @@ looking unanswered."
           (lambda (req) (cons (herdr-test-ok req '((type . "ok"))) nil))
         (herdr-workspace-close "w1")
         (should (string-match-p "w1" (or said "")))))))
+
+(ert-deftest herdr-workspace-close-retries-with-close-group-when-required ()
+  "herdr 0.9 rejects closing a primary workspace that still has linked
+worktrees unless `close_group' is set.  The command must offer that
+rather than leaving the error on the user."
+  (let (calls said)
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+      (herdr-test-with-server
+          (lambda (req)
+            (let ((params (alist-get 'params req)))
+              (push params calls)
+              (if (eq (alist-get 'close_group params) t)
+                  (cons (herdr-test-ok req '((type . "ok"))) nil)
+                (cons (herdr-test-err req "workspace_group_close_required"
+                                      "workspace has linked worktree workspaces")
+                      nil))))
+        (herdr-workspace-close "w1")
+        (should (= 2 (length calls)))
+        (should (equal "w1" (alist-get 'workspace_id (nth 1 calls))))
+        (should-not (alist-get 'close_group (nth 1 calls)))
+        (should (eq t (alist-get 'close_group (nth 0 calls))))
+        (should (string-match-p "group" (or said "")))))))
+
+(ert-deftest herdr-workspace-close-leaves-the-group-when-group-close-is-declined ()
+  (let (calls said)
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (prompt)
+                 (not (string-match-p "group" prompt))))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+      (herdr-test-with-server
+          (lambda (req)
+            (push (alist-get 'params req) calls)
+            (cons (herdr-test-err req "workspace_group_close_required"
+                                  "workspace has linked worktree workspaces")
+                  nil))
+        (herdr-workspace-close "w1")
+        (should (= 1 (length calls)))
+        (should-not (alist-get 'close_group (car calls)))
+        (should (string-match-p "left open" (or said "")))))))
 
 (ert-deftest herdr-workspace-focus-offers-to-adopt-an-unattachable-pane ()
   "Landing on a plain shell would otherwise do nothing at all."

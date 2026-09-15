@@ -230,5 +230,47 @@ arrays."
   (should (null (herdr-state-pane-directory
                  '((cwd . "/definitely/not/here/at/all"))))))
 
+;;; Workspace identity (WorkspaceInfo has no cwd)
+
+(ert-deftest herdr-state-workspace-for-directory-matches-worktree-checkout ()
+  "The public workspace record has no identity_cwd; worktree provenance
+is how a project root maps onto a workspace."
+  (let ((state (herdr-state-from-snapshot
+                `((workspaces
+                   . (((workspace_id . "w1") (label . "other")
+                       (worktree . ((checkout_path . "/tmp/other")
+                                    (repo_root . "/tmp/other"))))
+                      ((workspace_id . "w2") (label . "web")
+                       (worktree . ((checkout_path . "/tmp/web")
+                                    (repo_root . "/tmp/web"))))))
+                  (panes . ())))))
+    (should (equal "w2"
+                   (alist-get 'workspace_id
+                              (herdr-state-workspace-for-directory
+                               state "/tmp/web"))))))
+
+(ert-deftest herdr-state-workspace-for-directory-falls-back-to-pane-cwd ()
+  "A workspace that is not a worktree is identified by its panes' cwd."
+  (let ((state (herdr-state-from-snapshot
+                `((workspaces
+                   . (((workspace_id . "w1") (label . "web"))
+                      ((workspace_id . "w2") (label . "other"))))
+                  (panes
+                   . (((pane_id . "w1:p1") (workspace_id . "w1")
+                       (cwd . "/tmp/web"))
+                      ((pane_id . "w2:p1") (workspace_id . "w2")
+                       (cwd . "/tmp/other"))))))))
+    (should (equal "w1"
+                   (alist-get 'workspace_id
+                              (herdr-state-workspace-for-directory
+                               state "/tmp/web/"))))))
+
+(ert-deftest herdr-state-workspace-for-directory-is-nil-when-unknown ()
+  (let ((state (herdr-state-from-snapshot
+                '((workspaces . (((workspace_id . "w1") (label . "web"))))
+                  (panes . (((pane_id . "w1:p1") (workspace_id . "w1")
+                             (cwd . "/tmp/web"))))))))
+    (should-not (herdr-state-workspace-for-directory state "/tmp/nope"))))
+
 (provide 'herdr-state-test)
 ;;; herdr-state-test.el ends here

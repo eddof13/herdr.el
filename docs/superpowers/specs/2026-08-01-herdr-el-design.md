@@ -18,7 +18,7 @@ how terminals are hosted:
 - **`agent-windows`** — one ghostel buffer per agent, each running `herdr agent attach`. Emacs
   owns layout; herdr is a headless process and session manager.
 
-Target environment: Emacs 30.2, herdr 0.7.5 (protocol 17), macOS.
+Target environment: Emacs 30.2, herdr 0.9.0 (protocol 22), macOS.
 
 ## Goals
 
@@ -92,40 +92,40 @@ agents are blocked" into N queries. `herdr-project` focuses or creates the works
 
 ### Curated transient plus a schema-driven escape hatch
 
-herdr exposes 89 methods with a complete, typed JSON Schema. Three options were considered:
+herdr exposes 103 methods with a complete, typed JSON Schema. Three options were considered:
 
 - **Thin CLI wrapper** (shell out to `herdr pane split …`). Rejected: ~50ms per spawn, and the
   CLI has no long-lived subscribe, so the event-driven half of the goals dies or degrades to
   polling.
-- **Full codegen** of all 89 transient prefixes. Rejected: an 89-entry generated menu is a
+- **Full codegen** of all 103 transient prefixes. Rejected: a 103-entry generated menu is a
   directory listing, not a UI. Generated infixes cannot know that `pane_id` should default to the
   focused pane or offer a labeled picker. Curation would end up layered on top anyway, leaving
   both to maintain.
 - **Curated transient + runtime schema** (chosen). ~27 hand-written commands with real
   ergonomics, plus the schema loaded at runtime for two purposes:
-  1. `M-x herdr-call` — `completing-read` over all 89 methods, params prompted generically from
+  1. `M-x herdr-call` — `completing-read` over all 103 methods, params prompted generically from
      their schema. Full coverage, no generated menus, roughly 120 LOC.
   2. A drift test asserting every curated command's method and params still exist in the live
      schema, so herdr releases surface as a failing test rather than a runtime `not_found`.
 
 ## Protocol facts
 
-Established by probing herdr 0.7.5 directly, not from documentation.
+Established by probing a live herdr and by the published socket-API schema, not from memory.
 
 ### Socket and RPC
 
 | Fact | Consequence for the design |
 |---|---|
 | **One request per connection.** Server writes the response, then EOF. | No id-correlation table, no multiplexing, no reconnect logic on the command path. Fresh socket per call; unix-socket connect cost is negligible, so no pooling. |
-| `events.subscribe` holds the connection open. Acks with `{"id":…,"result":{"type":"subscription_started"}}`, then streams NDJSON event envelopes. | One dedicated long-lived connection, with reconnect-on-EOF. |
+| `events.subscribe` holds the connection open. Acks with `{"id":…,"result":{"type":"subscription_started"}}`, then streams NDJSON event envelopes. Lifecycle subscriptions start live and do not replay retained history. | Subscribe first, wait for the ack, buffer, snapshot, apply the buffer. Reconnect repeats that bootstrap. |
 | Global subscriptions require no `pane_id`. `pane_created` and `pane_updated` carry full `PaneInfo`, including `agent_status`. | No per-pane subscription bookkeeping — subject to the open question below. |
 | `pane.agent_status_changed` and `pane.scroll_changed` subscriptions **require** `pane_id`; `pane.output_matched` requires `pane_id`, `source`, and `match`. | Per-pane subscriptions are the fallback path, not the default. |
 | `layout_updated` carries the full layout: pane rects and splits. | Used by `session` backend only incidentally; unused by `agent-windows`. |
 | `pane.current` works with no environment variables — returns the focused pane. | Emacs does not need to inherit herdr pane env. Transient scope always defaults correctly. |
 | Errors: `{"id":"…","error":{"code":"invalid_request","message":"…"}}`. | Structured; map `code` onto an Emacs condition. |
-| `ping` returns `{"version","protocol","capabilities":{"live_handoff":true,"detached_server_daemon":true}}`. | Feature-detect via capabilities rather than version-sniffing. |
+| `ping` returns `{"version","protocol","capabilities":{"live_handoff":true,"detached_server_daemon":true,"endpoint_protocol_generation":1,…}}`. | Feature-detect via capabilities rather than version-sniffing. Warn on protocol mismatch, do not refuse. |
 | Enums: `ReadSource` = `visible｜recent｜recent_unwrapped｜detection`; `ReadFormat` = `text｜ansi`; `SplitDirection` = `right｜down`; `AgentStatus` = `idle｜working｜blocked｜done｜unknown`. | Drive infix `:choices` from the schema. |
-| 25 event kinds; 89 methods; 104 request param definitions. | Schema is complete enough for generic param prompting. |
+| 26 event kinds; 103 methods; protocol 22. | Schema is complete enough for generic param prompting. |
 | CLI's `herdr pane run` has no API method. | Implement as `pane.send_text` with a trailing newline. |
 
 ### `herdr agent attach` — the `agent-windows` mechanism
@@ -398,7 +398,7 @@ sends herdr outside Emacs.
 | 3 | `herdr-cmd`, `herdr-select` | Pickers work with marginalia and embark — goals 3 and 4 complete |
 | 4 | `herdr-transient` | Daily-usable — goal 1 complete |
 | 5 | `herdr-agents`, modeline segment | Goal 2 complete |
-| 6 | `herdr-call`, drift test | All 89 methods reachable |
+| 6 | `herdr-call`, drift test | All 103 methods reachable |
 | 7 | `agent-windows` backend | Both backends selectable; reconciliation test green |
 | 8 | README, package headers, autoloads | Publishable |
 
@@ -444,9 +444,8 @@ What changed:
   attach client needs a window when it starts, so that meant `M-x herdr` taking a window per agent
   before being asked for anything.  Panes are attached the first time they are visited instead.
   (The client survives being *hidden* — only a deleted window kills it.)
-- **Replay leaves ghost panes.**  Priming absorbs the subscription replay, but it ends after a
-  fixed quiet period, so a bursty replay can end it early and later `pane_created` events
-  resurrect long-closed panes.  Nothing in the event stream removes them, so the pane set is
+- **Cache can still drift.**  Lifecycle subscriptions no longer replay, but a disconnect gap or
+  a `cd` that never emits `pane_updated` still leaves the cache wrong.  The pane set is
   reconciled against `pane.list` on a poll.
 - **Directory changes are never announced.**  herdr tracks cwd accurately but publishes no event
   for it, so tracking polls rather than subscribes.

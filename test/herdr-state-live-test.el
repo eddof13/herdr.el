@@ -123,14 +123,64 @@
           (should (= 1 (length (herdr-state-agents (herdr-state-current))))))
       (herdr-state-stop))))
 
-(ert-deftest herdr-state-priming-suppresses-the-change-hook ()
-  "Replayed events must fold into the cache without notifying listeners.
-herdr replays history on subscribe — 54 events on an idle server here —
-so an unsuppressed hook would fire once per replayed event."
+(ert-deftest herdr-state-start-subscribes-before-taking-a-snapshot ()
+  "Lifecycle subscriptions no longer replay, so the stream must be live
+before the snapshot or events in the gap are lost."
+  (let (order)
+    (herdr-test-with-server
+        (lambda (req)
+          (push (alist-get 'method req) order)
+          (if (equal (alist-get 'method req) "session.snapshot")
+              (cons (herdr-test-ok
+                     req '((snapshot . ((focused_pane_id . "w1:p1")
+                                        (panes . [])))))
+                    nil)
+            (cons (herdr-test-ok req '((type . "subscription_started"))) t)))
+      (unwind-protect
+          (progn
+            (herdr-state-start)
+            (let ((methods (nreverse order)))
+              (should (equal "events.subscribe" (car methods)))
+              (should (member "session.snapshot" methods))
+              (should (< (seq-position methods "events.subscribe")
+                         (seq-position methods "session.snapshot")))))
+        (herdr-state-stop)))))
+
+(ert-deftest herdr-state-start-applies-events-buffered-during-snapshot ()
+  "Events that arrive after subscribe and before the snapshot is
+installed must still land in the cache, applied after the snapshot."
+  (herdr-test-with-server
+      (lambda (req)
+        (pcase (alist-get 'method req)
+          ("session.snapshot"
+           (cons (herdr-test-ok
+                  req '((snapshot . ((focused_pane_id . "w1:p1")
+                                     (panes . [((pane_id . "w1:p1"))])))))
+                 nil))
+          ("events.subscribe"
+           (cons (concat
+                  (herdr-test-ok req '((type . "subscription_started")))
+                  "{\"event\":\"pane_created\",\"data\":{\"pane\":{\"pane_id\":\"w1:p2\",\"agent\":\"codex\"}}}\n")
+                 t))
+          (_ (cons (herdr-test-ok req '((type . "ok"))) nil))))
+    (unwind-protect
+        (progn
+          (herdr-state-start)
+          (should (herdr-state-pane (herdr-state-current) "w1:p1"))
+          (should (herdr-state-pane (herdr-state-current) "w1:p2"))
+          (should (equal "codex"
+                         (alist-get 'agent
+                                    (herdr-state-pane (herdr-state-current)
+                                                      "w1:p2")))))
+      (herdr-state-stop))))
+
+(ert-deftest herdr-state-bootstrapping-suppresses-the-change-hook ()
+  "Events buffered while the snapshot is in flight must fold into the
+cache without notifying listeners for each one."
   (let* ((events nil)
          (herdr-state--current (herdr-state-empty))
-         (herdr-state--priming 'settle)
-         (herdr-state--prime-timer nil)
+         (herdr-state--bootstrapping 'buffer)
+         (herdr-state--event-buffer nil)
          (herdr-state-change-hook
           (list (lambda (kind data) (push (cons kind data) events))))
          (proc (herdr-state-live-test--proc)))
@@ -141,17 +191,17 @@ so an unsuppressed hook would fire once per replayed event."
                         "{\"pane_id\":\"w1:p1\"}}}\n"
                         "{\"event\":\"pane_created\",\"data\":{\"pane\":"
                         "{\"pane_id\":\"w1:p2\"}}}\n"))
-          ;; Folded in...
+          (should (null events))
+          (should-not (herdr-state-pane herdr-state--current "w1:p1"))
+          (herdr-state--apply-buffered-events)
           (should (= 2 (length (herdr-state-panes herdr-state--current))))
-          ;; ...but silently.
           (should (null events)))
-      (when herdr-state--prime-timer (cancel-timer herdr-state--prime-timer))
       (delete-process proc))))
 
-(ert-deftest herdr-state-not-priming-notifies-per-event ()
+(ert-deftest herdr-state-not-bootstrapping-notifies-per-event ()
   (let* ((events nil)
          (herdr-state--current (herdr-state-empty))
-         (herdr-state--priming nil)
+         (herdr-state--bootstrapping nil)
          (herdr-state-change-hook
           (list (lambda (kind data) (push (cons kind data) events))))
          (proc (herdr-state-live-test--proc)))
@@ -170,10 +220,9 @@ so an unsuppressed hook would fire once per replayed event."
     (cons (herdr-test-ok req `((type . "pane_list") (panes . ,panes))) nil)))
 
 (ert-deftest herdr-state-reconcile-drops-panes-the-server-no-longer-has ()
-  "Ghost panes are the visible symptom of the replay race: a bursty
-replay can end priming early, letting pane_created events for
-long-closed panes land after the settling snapshot.  They then appear in
-every picker and cannot be navigated to."
+  "A missed `pane_closed' (disconnect gap, or a burst the cache did not
+fold) leaves panes in every picker that cannot be navigated to.
+`pane.list' is the authoritative set."
   (herdr-test-with-server
       (herdr-state-live-test--pane-list-server
        [((pane_id . "w1:p1") (cwd . "/tmp"))])

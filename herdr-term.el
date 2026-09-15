@@ -22,7 +22,7 @@
 ;; tree goes unused, so there is no geometry to synchronise.  Agents
 ;; outlive Emacs because the server is a daemon.
 ;;
-;; Measurements that informed this, taken against herdr 0.7.5:
+;; Measurements that informed this, taken against a live herdr:
 ;;
 ;; - Throughput is not a reason to prefer either.  A 12.2 MB pane dump
 ;;   reached Emacs as 17 KB under `session' and 24 KB under

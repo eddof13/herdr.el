@@ -14,7 +14,7 @@
 ;;
 ;; That buys two things.  `herdr-call' can offer every method the server
 ;; knows about, prompting for each parameter according to its declared
-;; type, without anyone hand-writing 89 wrappers.  And the drift test can
+;; type, without anyone hand-writing 103 wrappers.  And the drift test can
 ;; assert that the wrappers we *did* hand-write still name methods and
 ;; parameters the server recognises, so a herdr upgrade surfaces as a
 ;; failing test instead of a runtime error.

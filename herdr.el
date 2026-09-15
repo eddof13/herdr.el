@@ -4,7 +4,7 @@
 
 ;; Author: Eddie Jesinsky
 ;; URL: https://github.com/ejesinsky/herdr.el
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Keywords: processes, terminals, tools
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Package-Requires: ((emacs "28.1") (transient "0.4.0") (ghostel "0"))
@@ -35,7 +35,7 @@
 (declare-function project-root "project" (project))
 (declare-function project-current "project" (&optional maybe-prompt directory))
 
-(defcustom herdr-protocol-version 19
+(defcustom herdr-protocol-version 22
   "Protocol version this package was written against.
 A mismatch warns once rather than refusing to run: declining to work
 because herdr bumped a minor is worse than one command misbehaving."
@@ -85,13 +85,8 @@ The herdr server keeps running; agents are unaffected."
                      (when-let* ((project (project-current nil)))
                        (expand-file-name (project-root project))))
                    default-directory))
-         (existing
-          (seq-find
-           (lambda (workspace)
-             (equal (file-name-as-directory
-                     (or (alist-get 'identity_cwd workspace) ""))
-                    (file-name-as-directory root)))
-           (herdr-state-workspaces (herdr-state-current)))))
+         (existing (herdr-state-workspace-for-directory
+                    (herdr-state-current) root)))
     (if existing
         (herdr-rpc-call "workspace.focus"
                         `((workspace_id . ,(alist-get 'workspace_id existing))))
