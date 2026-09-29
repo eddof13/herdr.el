@@ -23,16 +23,24 @@
 
 (defun herdr-transient-test--suffix-plist (node)
   "Return NODE's suffix plist, if NODE is a suffix entry.
-Layout entries are (LEVEL CLASS PLIST) lists and [LEVEL CLASS PLIST
-CHILDREN] vectors, and the children of a group are a plain list of
-entries — so identifying a suffix needs the shape checked, not just the
-third element read."
-  (and (consp node)
-       (integerp (car node))
-       (let ((plist (nth 2 node)))
-         (and (consp plist) (keywordp (car plist))
-              (plist-get plist :key)
-              plist))))
+
+Transient layout version 2 (Emacs 31, transient 0.10) stores a suffix
+as (CLASS . PLIST).  Older transient stored (LEVEL CLASS PLIST).
+Groups are vectors whose children are a plain list, so a suffix is
+identified by the plist carrying `:key`, not by position alone."
+  (cond
+   ((and (consp node)
+         (symbolp (car node))
+         (not (keywordp (car node)))
+         (keywordp (car-safe (cdr node)))
+         (plist-get (cdr node) :key))
+    (cdr node))
+   ((and (consp node)
+         (or (null (car node)) (integerp (car node)))
+         (let ((plist (nth 2 node)))
+           (and (consp plist) (keywordp (car plist))
+                (plist-get plist :key))))
+    (nth 2 node))))
 
 (defun herdr-transient-test--suffixes (prefix)
   "Return (KEY . COMMAND) for every suffix of PREFIX."

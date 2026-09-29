@@ -48,6 +48,20 @@
     (should (= 3 (length (herdr-state-panes next))))
     (should (herdr-state-pane next "w1:p3"))))
 
+(ert-deftest herdr-state-reduce-pane-created-keeps-an-existing-pane ()
+  "A late birth event must not wipe an agent learned since.
+`pane_created' is queued on the socket at creation and may be read only
+after `pane.report_agent' and a snapshot.  Replaying it used to drop the
+reported agent, which made `agent-windows' reap the buffer it had just
+attached."
+  (let* ((state (herdr-state-from-snapshot
+                 `((panes . (,(herdr-state-test--pane "w1:p1" "shell" "idle"))))))
+         (next (herdr-state-reduce
+                state "pane_created"
+                `((pane . ,(herdr-state-test--pane "w1:p1"))))))
+    (should (eq next state))
+    (should (equal "shell" (alist-get 'agent (herdr-state-pane next "w1:p1"))))))
+
 (ert-deftest herdr-state-reduce-is-pure ()
   "Reducing must not mutate the state it was handed."
   (let* ((state (herdr-state-test--seed))

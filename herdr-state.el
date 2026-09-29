@@ -235,7 +235,22 @@ global events use underscores while the three per-pane subscription
 events use dots, so both spellings appear here deliberately."
   (let ((next (herdr-state-copy state)))
     (pcase kind
-      ((or "pane_created" "pane_updated" "pane_moved" "pane_agent_detected")
+      ("pane_created"
+       ;; Insert only.  The birth event often sits unread on the socket
+       ;; until the next `accept-process-output', which can be after a
+       ;; snapshot has already recorded a newer pane — an adopted shell's
+       ;; agent, for example.  Replacing that pane with the birth record
+       ;; drops the agent, and `agent-windows' then reaps the buffer.
+       (let ((pane (alist-get 'pane data)))
+         (if (or (not pane)
+                 (herdr-state-pane state (alist-get 'pane_id pane)))
+             state
+           (setf (herdr-state-panes next)
+                 (herdr-state--upsert (herdr-state-panes state) 'pane_id
+                                      (alist-get 'pane_id pane) pane))
+           next)))
+
+      ((or "pane_updated" "pane_moved" "pane_agent_detected")
        (let ((pane (alist-get 'pane data)))
          (if (not pane)
              state
