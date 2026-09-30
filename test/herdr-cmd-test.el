@@ -359,49 +359,66 @@ directory's own name."
     (should (null (alist-get 'body params)))
     (should (equal "none" (alist-get 'sound params)))))
 
-;;; Promoting an adopted shell branches on what is detected
+;;; Adopting a shell is local; a legacy label is released
 
-(ert-deftest herdr-promote-shell-reports-the-detected-agent ()
-  "Once a real agent is running in an adopted shell, relabel the pane
-with it so it stops reading as a bare shell."
-  (let (resynced said)
-    (cl-letf (((symbol-function 'herdr-state-detected-agent)
-               (lambda (_) "claude"))
-              ((symbol-function 'herdr-state-resync)
+(ert-deftest herdr-adopt-shell-records-the-pane-locally ()
+  "Reporting an agent is what herdr 0.9.2 clears.  Adoption must not."
+  (let ((herdr-adopted-panes-file nil)
+        (herdr-adopted-pane-ids nil)
+        methods)
+    (cl-letf (((symbol-function 'herdr-state-resync) (lambda (&rest _) t))
+              ((symbol-function 'herdr-rpc-call)
+               (lambda (method &rest _) (push method methods)))
+              ((symbol-function 'message) (lambda (&rest _) nil)))
+      (herdr-adopt-shell "w1:p4")
+      (should (equal '("w1:p4") herdr-adopted-pane-ids))
+      (should-not methods))))
+
+(ert-deftest herdr-promote-shell-releases-a-legacy-label ()
+  (let ((herdr-adopted-panes-file nil)
+        (herdr-adopted-pane-ids nil)
+        (herdr-state--current
+         (herdr-state-from-snapshot
+          '((panes . (((pane_id . "w1:p1") (agent . "shell")))))))
+        resynced said)
+    (cl-letf (((symbol-function 'herdr-state-resync)
                (lambda (&rest _) (setq resynced t)))
               ((symbol-function 'message)
                (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
       (herdr-cmd-test--capturing-params params
         (herdr-promote-shell "w1:p1")
-        (should (equal "claude" (alist-get 'agent params)))
+        (should (equal "w1:p1" (alist-get 'pane_id params)))
+        (should (equal "herdr.el" (alist-get 'source params)))
+        (should (equal "shell" (alist-get 'agent params)))
         (should resynced)
-        (should (string-match-p "promoted" (or said "")))))))
-
-(ert-deftest herdr-promote-shell-does-nothing-without-a-detected-agent ()
-  (let (called said)
-    (cl-letf (((symbol-function 'herdr-state-detected-agent) (lambda (_) nil))
-              ((symbol-function 'herdr-rpc-call)
-               (lambda (&rest _) (setq called t)))
-              ((symbol-function 'message)
-               (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
-      (herdr-promote-shell "w1:p1")
-      (should-not called)
-      (should (string-match-p "no agent detected" (or said ""))))))
+        (should (string-match-p "released" (or said "")))
+        (should (equal '("w1:p1") herdr-adopted-pane-ids))))))
 
 (ert-deftest herdr-promote-shell-leaves-a-plain-shell-alone ()
-  "A pane still wearing only the adopted-shell label has nothing to be
-promoted to, so it must not report anything."
-  (let ((herdr-shell-agent-name "herdr-shell")
+  (let ((herdr-state--current
+         (herdr-state-from-snapshot
+          '((panes . (((pane_id . "w1:p1") (agent . nil)))))))
         called said)
-    (cl-letf (((symbol-function 'herdr-state-detected-agent)
-               (lambda (_) "herdr-shell"))
-              ((symbol-function 'herdr-rpc-call)
+    (cl-letf (((symbol-function 'herdr-rpc-call)
                (lambda (&rest _) (setq called t)))
               ((symbol-function 'message)
                (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
       (herdr-promote-shell "w1:p1")
       (should-not called)
       (should (string-match-p "still just a shell" (or said ""))))))
+
+(ert-deftest herdr-promote-shell-leaves-a-real-agent-alone ()
+  (let ((herdr-state--current
+         (herdr-state-from-snapshot
+          '((panes . (((pane_id . "w1:p1") (agent . "claude")))))))
+        called said)
+    (cl-letf (((symbol-function 'herdr-rpc-call)
+               (lambda (&rest _) (setq called t)))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+      (herdr-promote-shell "w1:p1")
+      (should-not called)
+      (should (string-match-p "already claude" (or said ""))))))
 
 ;;; Starting an agent must surface it
 

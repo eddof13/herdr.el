@@ -13,7 +13,7 @@
 ;; this reaches the other sixty-odd without anyone writing a wrapper for
 ;; them, by prompting from the server's own schema.
 ;;
-;; That is why the schema is loaded at runtime instead of generating 103
+;; That is why the schema is loaded at runtime instead of generating 102
 ;; transient prefixes: full coverage without a menu nobody can read.
 
 ;;; Code:

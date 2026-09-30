@@ -10,7 +10,7 @@
 ;;; Commentary:
 
 ;; Hand-written wrappers for the methods worth a keybinding.  herdr
-;; exposes 103; generating all of them would produce a menu nobody can
+;; exposes 102; generating all of them would produce a menu nobody can
 ;; read and prompts that cannot know a pane id should default to the
 ;; focused pane.  Everything not wrapped here stays reachable through
 ;; `herdr-call'.
@@ -38,6 +38,7 @@
     (herdr-pane-swap             "pane.swap"            "pane_id" "direction")
     (herdr-pane-rename           "pane.rename"          "pane_id" "label")
     (herdr-pane-focus            "pane.focus"           "pane_id")
+    (herdr-pane-clear            "pane.clear"           "pane_id")
     (herdr-pane-read             "pane.read"            "pane_id" "source" "lines" "format" "strip_ansi")
     (herdr-pane-send-text        "pane.send_text"       "pane_id" "text")
     (herdr-pane-run              "pane.send_text"       "pane_id" "text")
@@ -61,9 +62,8 @@
     (herdr-agent-explain         "agent.explain"        "target")
     (herdr-agent-focus           "agent.focus"          "target")
     (herdr-notification-show     "notification.show"    "title" "body" "sound")
-    (herdr-adopt-shell           "pane.report_agent"    "pane_id" "source" "agent" "state")
     (herdr-release-shell         "pane.release_agent"   "pane_id" "source" "agent")
-    (herdr-promote-shell         "pane.report_agent"    "pane_id" "source" "agent" "state"))
+    (herdr-promote-shell         "pane.release_agent"   "pane_id" "source" "agent"))
   "Every curated command, with the method and parameters it uses.
 Each entry is (COMMAND METHOD PARAM...).  Verified against the live
 schema by the drift test.")
@@ -71,9 +71,10 @@ schema by the drift test.")
 (defcustom herdr-adopt-created-shells t
   "Whether panes created from Emacs are adopted so they get a buffer.
 
-Only relevant under `agent-windows', where herdr refuses to attach to a
-pane that has no agent, so a newly created shell pane would otherwise be
-invisible.
+Only relevant under `agent-windows'.  A new pane is a plain shell.
+herdr 0.9.2 will attach to it by terminal id, but only panes this
+package has claimed get a buffer — otherwise every shell an agent
+splits for itself would take a window.
 
 The rule is deliberately about provenance rather than about shells in
 general: a pane you asked herdr.el to create is one you want to see, so
@@ -105,8 +106,8 @@ client, for which `pane.current' answers with the server's global focus
 — which need not be the pane just created, so trusting it named the
 wrong pane whenever focus sat elsewhere.
 
-Under `agent-windows' a fresh pane is a plain shell and herdr will not
-attach to a pane without an agent, so nothing appears on its own."
+Under `agent-windows' a fresh pane is a plain shell.  It gets a buffer
+only once it has been adopted; herdr attaches that buffer by terminal id."
   (when (and pane-id (eq herdr-terminal-backend 'agent-windows))
     (unless (herdr-term-select-pane pane-id)
       (if herdr-adopt-created-shells
@@ -207,6 +208,15 @@ result greppable."
                   `((pane_id . ,(or pane-id (herdr-select-target-pane)))
                     (label . ,label))))
 
+(defun herdr-pane-clear (&optional pane-id)
+  "Clear PANE-ID's screen and scrollback, keeping the current prompt.
+Full-screen apps are left alone by the server.  The binding is herdr
+0.9.2's `pane.clear'."
+  (interactive)
+  (let ((pane (or pane-id (herdr-select-target-pane "Clear pane: "))))
+    (herdr-rpc-call "pane.clear" `((pane_id . ,pane)))
+    (message "herdr: cleared %s" pane)))
+
 (defun herdr-pane-focus (&optional pane-id)
   "Focus PANE-ID, prompting when not given, and select its buffer.
 
@@ -225,7 +235,7 @@ nothing repaints — so Emacs is moved to match."
 
 Focusing a workspace or tab lands on one of its panes — the server
 decides which — so the pane has to be asked for rather than assumed.  If
-that pane is a plain shell it cannot be attached, which would otherwise
+that pane is a plain shell nobody has adopted, which would otherwise
 mean the command silently does nothing."
   (or (herdr-term-select-focused)
       (when-let* ((pane (herdr-cmd--current-pane-id)))
@@ -235,8 +245,8 @@ mean the command silently does nothing."
   "Offer to adopt PANE-ID when it cannot be shown as it stands.
 
 Going to a pane and having nothing happen is the worst outcome: the
-command looks broken when the real situation is that herdr will not
-attach to a pane without an agent."
+command looks broken when the real situation is that the pane was
+never adopted, so it has no buffer."
   (when (eq herdr-terminal-backend 'agent-windows)
     (let ((pane (herdr-state-pane (herdr-state-current) pane-id)))
       (cond
@@ -591,65 +601,69 @@ the same value it was adopted with.")
 (defun herdr-adopt-shell (&optional pane-id)
   "Give the plain shell pane PANE-ID a terminal buffer in Emacs.
 
-Only meaningful under the `agent-windows' backend, where a pane with no
-agent has no buffer and is therefore invisible: herdr refuses to attach
-to one.  Reporting an agent named `herdr-shell-agent-name' makes it
-attachable, after which the usual reconciliation gives it a buffer.
+Only meaningful under the `agent-windows' backend, where a pane nobody
+has claimed has no buffer.  herdr 0.9.2 attaches by terminal id, so the
+claim is the local list `herdr-adopted-pane-ids' (persisted in
+`herdr-adopted-panes-file').  Reporting an agent used to mark the pane
+and no longer can: an unknown label is cleared once the pane sits at an
+idle shell, and a known label hides herdr's own detector.
 
-The shell then outlives Emacs, which is the point — a build started this
-way survives a restart, which a plain ghostel shell cannot.
-
-Costs: herdr's own sidebar lists the pane in its agents section, labelled
-with `herdr-shell-agent-name'.  herdr.el keeps it out of the modeline
-count, the agent picker and notifications, since a shell has no
-lifecycle.  Reverse it with `herdr-release-shell'."
+The shell then outlives Emacs.  The id list does too, so a restart
+reattaches the same panes.  Reverse it with `herdr-release-shell'."
   (interactive)
   (let ((pane (or pane-id (herdr-select-pane "Adopt shell pane: "))))
-    (herdr-rpc-call "pane.report_agent"
-                    `((pane_id . ,pane)
-                      (source . ,herdr-cmd-adopt-source)
-                      (agent . ,herdr-shell-agent-name)
-                      (state . "idle")))
-    ;; Adoption and release are not reliably announced on the event
-    ;; stream, so settle the cache rather than waiting for news.
+    (herdr-state-adopt-pane pane)
+    ;; The buffer is built from the cache.  Adoption is local, so nothing
+    ;; on the event stream announces it.
     (herdr-state-resync)
     (message "herdr: adopted %s; it will get a buffer under agent-windows" pane)))
 
 (defun herdr-promote-shell (&optional pane-id)
-  "Relabel PANE-ID with whatever agent herdr has detected running in it.
+  "Drop a leftover shell label on PANE-ID so herdr can detect agents.
 
-Use after starting an agent inside an adopted shell.  This happens
-automatically on the next poll; the command is for not waiting."
+herdr 0.9.2 clears a self-reported label once the pane is an idle shell.
+A pane that still wears `herdr-shell-agent-name' is from an older
+herdr.el: it is remembered locally, then `pane.release_agent' drops the
+label.  The buffer stays, because the pane is adopted.  A plain shell
+and a pane that already runs a real agent are left alone.
+
+This also runs from the directory poll.  The command is for not waiting."
   (interactive)
-  (let* ((pane (or pane-id (herdr-select-target-pane "Promote pane: ")))
-         (detected (herdr-state-detected-agent pane)))
+  (let* ((pane-id (or pane-id (herdr-select-target-pane "Promote pane: ")))
+         (agent (alist-get 'agent (herdr-state-pane (herdr-state-current) pane-id))))
     (cond
-     ((null detected)
-      (message "herdr: no agent detected in %s" pane))
-     ((equal detected herdr-shell-agent-name)
-      (message "herdr: %s is still just a shell" pane))
-     (t
-      (herdr-rpc-call "pane.report_agent"
-                      `((pane_id . ,pane) (source . ,herdr-cmd-adopt-source)
-                        (agent . ,detected) (state . "idle")))
+     ((equal agent herdr-shell-agent-name)
+      (herdr-state-adopt-pane pane-id)
+      (herdr-rpc-call "pane.release_agent"
+                      `((pane_id . ,pane-id)
+                        (source . ,herdr-cmd-adopt-source)
+                        (agent . ,herdr-shell-agent-name)))
       (herdr-state-resync)
-      (message "herdr: %s promoted to %s" pane detected)))))
+      (message "herdr: released the legacy shell label on %s" pane-id))
+     ((null agent)
+      (message "herdr: %s is still just a shell" pane-id))
+     (t
+      (message "herdr: %s is already %s" pane-id agent)))))
 
 (defun herdr-release-shell (&optional pane-id)
   "Undo `herdr-adopt-shell' for PANE-ID, dropping its buffer.
-The pane and its shell are untouched; only the reported agent goes away."
+The pane and its shell are untouched.  A leftover shell label is
+released as well, so herdr's sidebar stops listing it."
   (interactive)
-  (let ((pane (or pane-id
-                  (herdr-select--read
-                   "Release shell pane: "
-                   (mapcar (lambda (p) (alist-get 'pane_id p))
-                           (seq-filter #'herdr-state-shell-pane-p
-                                       (herdr-state-panes (herdr-state-current))))
-                   'herdr-pane #'herdr-select--annotate-pane))))
-    (herdr-rpc-call "pane.release_agent"
-                    `((pane_id . ,pane)
-                      (source . ,herdr-cmd-adopt-source)
-                      (agent . ,herdr-shell-agent-name)))
+  (let* ((pane (or pane-id
+                   (herdr-select--read
+                    "Release shell pane: "
+                    (mapcar (lambda (p) (alist-get 'pane_id p))
+                            (seq-filter #'herdr-state-shell-pane-p
+                                        (herdr-state-panes (herdr-state-current))))
+                    'herdr-pane #'herdr-select--annotate-pane)))
+         (agent (alist-get 'agent (herdr-state-pane (herdr-state-current) pane))))
+    (herdr-state-unadopt-pane pane)
+    (when (equal agent herdr-shell-agent-name)
+      (herdr-rpc-call "pane.release_agent"
+                      `((pane_id . ,pane)
+                        (source . ,herdr-cmd-adopt-source)
+                        (agent . ,herdr-shell-agent-name))))
     (herdr-state-resync)
     (message "herdr: released %s" pane)))
 

@@ -230,10 +230,56 @@ arrays."
                            (herdr-state-agents state))))))
 
 (ert-deftest herdr-state-shell-pane-p-keys-off-the-configured-name ()
-  (let ((herdr-shell-agent-name "adopted"))
+  (let ((herdr-shell-agent-name "adopted")
+        (herdr-adopted-pane-ids nil))
     (should (herdr-state-shell-pane-p '((agent . "adopted"))))
     (should-not (herdr-state-shell-pane-p '((agent . "shell"))))
     (should-not (herdr-state-shell-pane-p '((agent . nil))))))
+
+(ert-deftest herdr-state-local-adoption-marks-a-shell ()
+  "herdr 0.9.2 will not keep a reported shell label, so adoption is local."
+  (let ((herdr-adopted-pane-ids '("w1:p2"))
+        (herdr-adopted-panes-file nil)
+        (state (herdr-state-from-snapshot
+                `((panes . (((pane_id . "w1:p1") (agent . "claude"))
+                            ((pane_id . "w1:p2") (agent . nil))
+                            ((pane_id . "w1:p3") (agent . nil))))))))
+    (should (herdr-state-shell-pane-p '((pane_id . "w1:p2") (agent . nil))))
+    (should-not (herdr-state-shell-pane-p '((pane_id . "w1:p3") (agent . nil))))
+    (should (equal '("w1:p1" "w1:p2")
+                   (mapcar (lambda (p) (alist-get 'pane_id p))
+                           (herdr-state-attachable state))))
+    (should (equal '("w1:p1")
+                   (mapcar (lambda (p) (alist-get 'pane_id p))
+                           (herdr-state-agents state))))))
+
+(ert-deftest herdr-state-adopted-panes-round-trip-through-a-file ()
+  (let* ((dir (make-temp-file "herdr-adopted" t))
+         (herdr-adopted-panes-file (expand-file-name "adopted" dir))
+         (herdr-adopted-pane-ids nil))
+    (unwind-protect
+        (progn
+          (herdr-state-adopt-pane "w1:p1")
+          (herdr-state-adopt-pane "w1:p1")
+          (herdr-state-adopt-pane "w2:p1")
+          (setq herdr-adopted-pane-ids nil)
+          (herdr-state-load-adopted-panes)
+          (should (equal '("w1:p1" "w2:p1") herdr-adopted-pane-ids))
+          (herdr-state-unadopt-pane "w1:p1")
+          (setq herdr-adopted-pane-ids nil)
+          (herdr-state-load-adopted-panes)
+          (should (equal '("w2:p1") herdr-adopted-pane-ids)))
+      (delete-directory dir t))))
+
+(ert-deftest herdr-state-events-lost-requests-a-fast-resync ()
+  "An error line on the event stream means the server is about to close it."
+  (let ((herdr-state--resync-now nil)
+        (herdr-state--bootstrapping nil)
+        (herdr-state--current (herdr-state-empty)))
+    (herdr-state--handle-line
+     "{\"id\":\"1\",\"error\":{\"code\":\"events_lost\",\"message\":\"fell behind\"}}")
+    (should herdr-state--resync-now)
+    (should (= 0 (length (herdr-state-panes herdr-state--current))))))
 
 (ert-deftest herdr-state-pane-directory-prefers-cwd ()
   (should (equal "/tmp/" (herdr-state-pane-directory

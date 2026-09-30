@@ -42,7 +42,7 @@ ideas. Asserted by tests, not just by review.
 ## Requirements
 
 - Emacs 28.1+
-- [herdr](https://herdr.dev) 0.9.1 (protocol 22)
+- [herdr](https://herdr.dev) 0.9.3 (protocol 22). 0.9.2 is the release that changed adoption; 0.9.3 is the same-day fix this package was tested against.
 - `ghostel`, `transient`
 
 Optional, used when present, never required: `marginalia`, `embark`, `consult`, `alert`.
@@ -91,9 +91,10 @@ keyboard-first and needs no TUI at all.
 
 ### `agent-windows`
 
-One ghostel buffer per agent — `*herdr: claude w1:p1*` — each running `herdr agent attach`.
-Emacs owns the layout; herdr's own layout tree goes unused, so there is no geometry to keep in
-sync.
+One ghostel buffer per claimed pane — `*herdr: claude w1:p1*`, or `*herdr: shell w1:p1*` for an
+adopted shell — each running `herdr terminal attach` on that pane's terminal id. `herdr agent
+attach` is only the fallback when a pane has no terminal id. Emacs owns the layout; herdr's own
+layout tree goes unused, so there is no geometry to keep in sync.
 
 **Attaching is lazy, and nothing splits.** `M-x herdr` takes no windows and opens no buffers; a
 pane is attached the first time you go to it, in the current window. Splitting stays yours —
@@ -107,8 +108,9 @@ The reason to want it: **agents survive Emacs exiting**, because the herdr serve
 Quit Emacs, restart, `M-x herdr`, and every agent is still there and reattached. A plain ghostel
 shell cannot do that — it is a child of Emacs and dies with it.
 
-The cost: `herdr agent attach` refuses a pane with no detected agent, so plain shell panes get no
-buffer by default. They stay reachable through `pane.read`, `pane.send_text`,
+The cost: a pane with no agent, and that nobody has adopted, gets no buffer. `herdr agent attach`
+still refuses that pane; `herdr terminal attach` would accept it, and herdr.el only does so for
+panes it has claimed. Unclaimed shells stay reachable through `pane.read`, `pane.send_text`,
 `pane.wait_for_output` and the menu, and `ghostel-project` covers ordinary interactive shells.
 
 ### Adopting a shell
@@ -125,32 +127,27 @@ rule is about provenance: panes appearing from anywhere else, including ones an 
 itself, are never claimed behind your back.
 
 Provenance is judged once, when the command runs; there is no lasting record that Emacs created a
-pane. The adoption it produces *is* lasting, though, because the reported agent is server-side
-state — so an adopted pane is still adopted after you restart Emacs.
+pane. The adoption it produces is a list of pane ids in `herdr-adopted-panes-file` (by default
+`~/.emacs.d/herdr/adopted-panes`), so an adopted pane is still adopted after you restart Emacs.
+herdr 0.9.2 will not keep that claim on the server: reporting an unknown agent such as `shell` is
+cleared about a second after the pane is back at an idle prompt, and reporting a *known* agent
+name sticks and hides herdr's detector. The package does not call `pane.report_agent` to adopt,
+and it does not send `resume_argv`.
 
-`M-x herdr-adopt-shell` does the same for any pane you point it at, by reporting an agent named
-`herdr-shell-agent-name` (default `shell`) — which is the only thing `agent attach` checks. Use it
-for a pane you want to watch in Emacs *and* keep running across an Emacs restart, such as a long
-build.
+`M-x herdr-adopt-shell` does the same for any pane you point it at. Use it for a pane you want to
+watch in Emacs *and* keep running across an Emacs restart, such as a long build. The buffer
+attaches with `herdr terminal attach <terminal_id>`.
 
 Adopted shells get buffers but are **not** treated as agents: they stay out of the modeline count,
 the agent picker and notifications, since a shell has no lifecycle. They show as `shell*` with a
-`~` glyph in `*herdr-agents*`.
+`~` glyph in `*herdr-agents*`. A real agent herdr detects in that pane shows up as that agent; the
+buffer is renamed in place.
 
-**Adoption suppresses herdr's own agent detection for that pane.** Reporting an agent takes
-lifecycle authority, so the reported label outranks the detector: start Claude inside an adopted
-shell and the pane stays labelled `shell`. herdr.el compensates by reading what the detector
-concluded — `agent.explain` still reports it — and relabelling the pane accordingly. That runs on
-the poll; `M-x herdr-promote-shell` (`P G`) does it now.
-
-Do not try to fix this with `pane.release_agent` or `pane.clear_agent_authority`. Detection binds
-when an agent starts and does not re-run, so releasing leaves the pane with *no* agent rather than
-the one plainly running in it, and the only way back is restarting the agent.
-
-The visible cost is one row in herdr's own sidebar, in its agents section, labelled `shell`. That
-section's membership rule is simply "has a reported agent", and herdr's sidebar does not list
-non-agent panes at all — so there is no "plain shell" row for it to be instead.
-`M-x herdr-release-shell` reverses it completely.
+A pane left over from herdr.el 0.2 still wears the agent name `herdr-shell-agent-name` (default
+`shell`). The directory poll remembers it locally and calls `pane.release_agent` so herdr's
+detector can run. `M-x herdr-promote-shell` (`P G`) does that now.
+`M-x herdr-release-shell` forgets the local id and drops its buffer. A pane herdr could not
+restore carries `restore_error`, which the agents tree prints.
 
 ## What was measured
 
@@ -167,21 +164,24 @@ Recorded here because most of it is not written down anywhere else.
 | `agent attach` | Streams one pane full-screen; coexists with a session client; **exclusive per pane**; refuses panes without a detected agent. |
 | Attach needs a window | The client needs a window when it starts and dies if that window is *deleted*; being merely hidden is fine, so a buried terminal keeps running with its scrollback. A zero-sized PTY renders nothing. |
 | **Cache can still drift** | A disconnect gap, or a `cd` that never emits `pane_updated`, leaves the cache wrong. The pane set is reconciled against `pane.list` on a poll. |
-| **Adoption outranks detection** | `pane.report_agent` takes lifecycle authority, so an adopted pane keeps its label even once a real agent starts in it. `agent.explain` still reports what the detector concluded, which is what promotion reads. Releasing authority does *not* restore detection — it binds at agent start and does not re-run. |
+| **Self-reported agents clear** | On herdr 0.9.3, `pane.report_agent` of an unknown label (`shell`, state `idle` or `working`, with or without `resume_argv`) is gone from `pane.get` within about a second while the pane is an idle shell. A known label such as `maki` or `claude` sticks, and `agent.explain` then reports that label rather than the process in the pane. |
 | Focus | `pane.focus` sets the session's focused pane. Viewing clients can present different workspaces and tabs independently; `pane.focused` reports a selection without moving other clients' views. |
 | OSC | **Not** forwarded — herdr's VT consumes OSC 7 and OSC 133. Beware the false positive: sending the escapes inline makes the shell echo the command text, which contains the same characters. |
 | cwd tracking | herdr tracks it **itself** — `pane.cwd` follows a `cd` within about a second. But it publishes **no event** for it: a `cd` emits only `layout_updated` noise, so directory tracking has to poll (debounced off the event stream, with a slow backstop timer). |
-| Shell panes | `pane.report_agent` makes a plain shell pane attachable, which is how adoption works. |
+| Shell panes | `herdr terminal attach <terminal_id>` accepts a plain shell. `herdr agent attach` on a pane with no agent returns `agent_not_found`. A zero-sized PTY is refused (`terminal reported a zero-sized grid`). |
 | `pane.read` shape | Text is nested under a `read` object, not a top-level field. Recent reads include output still in the viewport. |
 | `workspace.close` | Closing a primary workspace that still has linked worktree workspaces requires `close_group: true`, otherwise the group stays open (`workspace_group_close_required`). |
 | `WorkspaceInfo` | Has no cwd. A worktree workspace is identified by `worktree.checkout_path`; any other workspace is identified by its panes' cwd. |
 | JSON arrays | Emacs's `json-serialize` cannot distinguish a list of alists from one alist. Array parameters must be vectors or `events.subscribe` is rejected. |
+| `pane.clear` | herdr 0.9.2. Clears scrollback and keeps the prompt. `pane.graphics.info`, `pane.graphics.set` and `pane.graphics.clear` are `unknown_method`. The schema has **102** request methods; protocol is still 22. |
+| `events_lost` | A subscription that falls behind receives an error line (`code` `events_lost`) and then the socket closes. The client resubscribes and takes a fresh snapshot. The reconnect backoff is reset so that resync is not postponed by an earlier failure. |
+| `restore_error` | `PaneInfo` may carry a string when herdr could not restore the pane. The agents tree prints it. |
 
 ## Commands
 
 34 curated commands cover the methods worth a keybinding; `M-x herdr-call` reaches all
-**103**, prompting for each parameter from the server's own schema. Nothing is out of reach and
-there is no generated 103-entry menu.
+**102**, prompting for each parameter from the server's own schema. Nothing is out of reach and
+there is no generated 102-entry menu. `herdr-adopt-shell` is a local claim, not a socket method.
 
 Worth knowing about:
 
@@ -198,8 +198,9 @@ Worth knowing about:
 - **`herdr-agent-wait`** and **`herdr-pane-wait-for-output`** — asynchronous, so Emacs stays
   responsive. "Tell me when the dev server prints `Listening on`" is one command.
 - **`herdr-project`** — focus or create the herdr workspace for the current `project.el` project.
+- **`herdr-pane-clear`** — `pane.clear`. Clears the pane's scrollback and keeps the current prompt.
 - **`herdr-adopt-shell`** / **`herdr-release-shell`** / **`herdr-promote-shell`** — see Adopting a
-  shell, above.
+  shell, above. Promote only releases a leftover `shell` label from herdr.el 0.2.
 
 Terminal buffers track their pane's working directory (`herdr-term-track-directory`), so
 `find-file` and `compile` from a herdr buffer start in the right place.
@@ -252,6 +253,8 @@ offers focus, read, prompt, close and zoom.
 make test        # hermetic; no herdr required, uses a fake server
 make test-live   # needs a running herdr; includes the schema drift test
 make compile     # byte-compile, warnings are errors
+# point the live suite at one session and keep it off the adopted-pane file:
+make test-live HERDR_SOCKET="$HOME/.config/herdr/sessions/herdr-el-093/herdr.sock"
 ```
 
 `make test-live` includes a drift test that checks every curated command's method and parameters
@@ -267,7 +270,9 @@ run it in a real frame as well.
 
 ## Design notes
 
-Full design and rationale: [`docs/superpowers/specs/2026-08-01-herdr-el-design.md`](docs/superpowers/specs/2026-08-01-herdr-el-design.md).
+This README is the current contract, including the herdr 0.9.2/0.9.3 measurements above. The
+design write-up records the original shape of the package:
+[`docs/superpowers/specs/2026-08-01-herdr-el-design.md`](docs/superpowers/specs/2026-08-01-herdr-el-design.md).
 
 ## License
 

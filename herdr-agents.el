@@ -191,6 +191,14 @@ is why Emacs's own `global-mode-string' conventionally starts with \"\"."
   (interactive)
   (herdr-agent-read (herdr-agents--pane-at-point) "recent_unwrapped"))
 
+(defun herdr-agents--restore-suffix (pane)
+  "Return a short note when PANE failed to restore, or an empty string.
+herdr 0.9.2 records that on `PaneInfo.restore_error'."
+  (let ((err (alist-get 'restore_error pane)))
+    (if (and (stringp err) (not (string-empty-p err)))
+        (format "  [restore failed: %s]" err)
+      "")))
+
 (defun herdr-agents--insert-tree (state)
   "Insert the workspace, tab and pane tree for STATE."
   (dolist (workspace (herdr-state-workspaces state))
@@ -209,10 +217,11 @@ is why Emacs's own `global-mode-string' conventionally starts with \"\"."
                                      " " nil #'equal))))
             (insert
              (propertize
-              (format "  %s %-10s %-9s %-12s %s\n"
+              (format "  %s %-10s %-9s %-12s %s%s\n"
                       glyph (or agent "shell") (or status "")
                       id
-                      (or (alist-get 'terminal_title_stripped pane) ""))
+                      (or (alist-get 'terminal_title_stripped pane) "")
+                      (herdr-agents--restore-suffix pane))
               'herdr-pane-id id)))))
       (insert "\n"))))
 

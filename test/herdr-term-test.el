@@ -66,10 +66,27 @@
     (should (string-match-p "w1:p1" name))))
 
 (ert-deftest herdr-term-attach-args-target-the-pane ()
+  "A bare id with no cached terminal falls back to `agent attach'."
   (should (equal '("agent" "attach" "w1:p1")
                  (herdr-term-attach-args "w1:p1" nil)))
   (should (equal '("agent" "attach" "w1:p1" "--takeover")
                  (herdr-term-attach-args "w1:p1" t))))
+
+(ert-deftest herdr-term-attach-args-prefer-the-terminal-id ()
+  "herdr 0.9.2 attaches a plain shell by terminal id."
+  (let ((pane '((pane_id . "w1:p1") (terminal_id . "term_abc"))))
+    (should (equal '("terminal" "attach" "term_abc")
+                   (herdr-term-attach-args pane nil)))
+    (should (equal '("terminal" "attach" "term_abc" "--takeover")
+                   (herdr-term-attach-args pane t))))
+  (should (equal '("agent" "attach" "w1:p1")
+                 (herdr-term-attach-args
+                  '((pane_id . "w1:p1") (terminal_id . "")) nil))))
+
+(ert-deftest herdr-term-agent-buffer-name-falls-back-to-shell ()
+  (should (string-match-p "\\`\\*herdr: shell w1:p1\\*\\'"
+                          (herdr-term-agent-buffer-name
+                           (herdr-term-test--pane "w1:p1" nil)))))
 
 (ert-deftest herdr-term-session-args-are-empty ()
   "The session backend runs bare herdr, which attaches the whole session."
@@ -88,10 +105,26 @@
 
 (ert-deftest herdr-term-reconcile-reaps-a-released-shell ()
   "Releasing the adopted agent makes the pane unattachable again."
-  (let* ((state (herdr-term-test--state (herdr-term-test--pane "w1:p2" nil)))
+  (let* ((herdr-adopted-pane-ids nil)
+         (state (herdr-term-test--state (herdr-term-test--pane "w1:p2" nil)))
          (result (herdr-term-reconcile state '(("w1:p2" . :buf)))))
     (should (null (car result)))
     (should (equal '(:buf) (cdr result)))))
+
+(ert-deftest herdr-term-reconcile-keeps-a-locally-adopted-shell ()
+  "A pane with no agent still gets a buffer once it has been adopted."
+  (let* ((herdr-adopted-pane-ids '("w1:p2"))
+         (herdr-adopted-panes-file nil)
+         (state (herdr-term-test--state
+                 (herdr-term-test--pane "w1:p1" "claude")
+                 (herdr-term-test--pane "w1:p2" nil)))
+         (created (herdr-term-reconcile state nil))
+         (kept (herdr-term-reconcile state '(("w1:p2" . :buf)))))
+    (should (equal '("w1:p1" "w1:p2")
+                   (mapcar (lambda (p) (alist-get 'pane_id p)) (car created))))
+    (should (equal '("w1:p1")
+                   (mapcar (lambda (p) (alist-get 'pane_id p)) (car kept))))
+    (should (null (cdr kept)))))
 
 (ert-deftest herdr-term-set-directory-follows-the-pane ()
   (with-temp-buffer

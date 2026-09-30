@@ -121,6 +121,7 @@ where magit puts the same two ideas."
     ("m" "swap"        herdr-pane-swap)]
    ["Content"
     ("r" "read → buffer" herdr-pane-read)
+    ("c" "clear screen"  herdr-pane-clear)
     ("!" "run command"   herdr-pane-run)
     ("i" "send text"     herdr-pane-send-text)
     ("o" "wait output…"  herdr-pane-wait-for-output)]
@@ -130,9 +131,9 @@ where magit puts the same two ideas."
     ("k" "close"  herdr-pane-close)]
    ["Adopt"
     :if-not herdr-transient-tui-p
-    ("A" "adopt shell"   herdr-adopt-shell)
-    ("U" "unadopt shell" herdr-release-shell)
-    ("G" "promote shell" herdr-promote-shell)]])
+    ("A" "adopt shell"        herdr-adopt-shell)
+    ("U" "unadopt shell"      herdr-release-shell)
+    ("G" "drop legacy label"  herdr-promote-shell)]])
 
 (transient-define-prefix herdr-transient-agent ()
   "Act on an agent."

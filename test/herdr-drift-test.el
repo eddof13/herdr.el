@@ -131,7 +131,8 @@ one itself."
   (herdr-drift-test--ensure-pane)
   (herdr-state-stop)
   (unwind-protect
-      (progn
+      (let ((herdr-adopted-panes-file nil)
+            (herdr-adopted-pane-ids nil))
         (herdr-state-start)
         (let ((deadline (+ (float-time) 6)))
           (while (< (float-time) deadline) (accept-process-output nil 0.1)))
@@ -152,6 +153,76 @@ one itself."
               (accept-process-output nil 0.1)))
           (should-not (herdr-state-pane (herdr-state-current) pane))))
     (herdr-state-stop)))
+
+(ert-deftest herdr-drift-graphics-methods-are-gone ()
+  "herdr 0.9.2 retired pane.graphics.*."
+  :tags '(:live)
+  (skip-unless (herdr-drift-test--server-p))
+  (should (equal "unknown_method"
+                 (herdr-error-code
+                  (should-error
+                   (herdr-rpc-call "pane.graphics.info" '((pane_id . "w1:p1")))
+                   :type 'herdr-error)))))
+
+(ert-deftest herdr-drift-self-reported-shell-label-clears ()
+  "An unknown self-reported agent is cleared once the pane is an idle shell.
+That is why adoption is a local pane id rather than `pane.report_agent'."
+  :tags '(:live)
+  (skip-unless (herdr-drift-test--server-p))
+  (herdr-drift-test--ensure-pane)
+  (let ((pane (alist-get 'pane_id
+                         (alist-get 'pane
+                                    (herdr-rpc-call
+                                     "pane.split" '((direction . "right")))))))
+    (unwind-protect
+        (progn
+          (herdr-rpc-call "pane.report_agent"
+                          `((pane_id . ,pane)
+                            (source . "herdr.el")
+                            (agent . "shell")
+                            (state . "idle")))
+          (let ((deadline (+ (float-time) 4))
+                (agent t))
+            (while (and (< (float-time) deadline) agent)
+              (sleep-for 0.4)
+              (setq agent
+                    (alist-get 'agent
+                               (alist-get 'pane
+                                          (herdr-rpc-call
+                                           "pane.get" `((pane_id . ,pane)))))))
+            (should-not agent)))
+      (ignore-errors (herdr-rpc-call "pane.close" `((pane_id . ,pane)))))))
+
+(ert-deftest herdr-drift-pane-clear-drops-scrollback ()
+  :tags '(:live)
+  (skip-unless (herdr-drift-test--server-p))
+  (herdr-drift-test--ensure-pane)
+  (let ((pane (alist-get 'pane_id
+                         (alist-get 'pane
+                                    (herdr-rpc-call
+                                     "pane.split" '((direction . "right")))))))
+    (unwind-protect
+        (progn
+          (herdr-rpc-call "pane.send_text"
+                          `((pane_id . ,pane)
+                            (text . "echo HERDR_CLEAR_MARKER\n")))
+          (sleep-for 1.5)
+          (should (string-match-p
+                   "HERDR_CLEAR_MARKER"
+                   (herdr-cmd-read-text
+                    (herdr-rpc-call "pane.read"
+                                    `((pane_id . ,pane)
+                                      (source . "recent_unwrapped")
+                                      (strip_ansi . t))))))
+          (herdr-rpc-call "pane.clear" `((pane_id . ,pane)))
+          (should-not (string-match-p
+                       "HERDR_CLEAR_MARKER"
+                       (herdr-cmd-read-text
+                        (herdr-rpc-call "pane.read"
+                                        `((pane_id . ,pane)
+                                          (source . "recent_unwrapped")
+                                          (strip_ansi . t)))))))
+      (ignore-errors (herdr-rpc-call "pane.close" `((pane_id . ,pane)))))))
 
 (provide 'herdr-drift-test)
 ;;; herdr-drift-test.el ends here

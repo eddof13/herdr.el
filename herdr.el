@@ -4,7 +4,7 @@
 
 ;; Author: Eddie Jesinsky
 ;; URL: https://github.com/ejesinsky/herdr.el
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Keywords: processes, terminals, tools
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Package-Requires: ((emacs "28.1") (transient "0.4.0") (ghostel "0"))
@@ -37,8 +37,9 @@
 
 (defcustom herdr-protocol-version 22
   "Protocol version this package was written against.
-A mismatch warns once rather than refusing to run: declining to work
-because herdr bumped a minor is worse than one command misbehaving."
+herdr 0.9.3 still speaks protocol 22.  A mismatch warns once rather
+than refusing to run: declining to work because herdr bumped a minor
+is worse than one command misbehaving."
   :type 'integer
   :group 'herdr)
 

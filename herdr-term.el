@@ -17,10 +17,12 @@
 ;; `session' runs the herdr TUI in a single ghostel buffer.  herdr owns
 ;; the layout, plain shell panes work, and it is about sixty lines.
 ;;
-;; `agent-windows' runs one ghostel buffer per agent, each holding a
-;; `herdr agent attach'.  Emacs owns the layout and herdr's own layout
-;; tree goes unused, so there is no geometry to synchronise.  Agents
-;; outlive Emacs because the server is a daemon.
+;; `agent-windows' runs one ghostel buffer per claimed pane.  herdr 0.9.2
+;; attaches that pane with `herdr terminal attach' on its terminal id;
+;; `herdr agent attach' remains the fallback when a pane has no terminal
+;; id.  Emacs owns the layout and herdr's own layout tree goes unused,
+;; so there is no geometry to synchronise.  Claimed panes outlive Emacs
+;; because the server is a daemon.
 ;;
 ;; Measurements that informed this, taken against a live herdr:
 ;;
@@ -28,8 +30,9 @@
 ;;   reached Emacs as 17 KB under `session' and 24 KB under
 ;;   `agent-windows'; herdr's VT only emits visible-frame diffs, so it
 ;;   rate-limits by construction.
-;; - `agent attach' refuses a pane with no detected agent, which is why
-;;   reconciliation considers agents rather than panes.
+;; - `terminal attach' accepts a plain shell.  `agent attach' still
+;;   refuses a pane with no agent, which is why an unadopted shell gets
+;;   no buffer.
 ;; - Attachment is exclusive per pane, so a second attach needs
 ;;   `--takeover'.  We ask first rather than stealing.
 ;; - The client paints nothing into a zero-sized PTY.  ghostel sizes its
@@ -50,9 +53,9 @@
   "How herdr's terminals are hosted inside Emacs.
 
 `session' runs the herdr TUI in one ghostel buffer and lets herdr own
-the layout.  `agent-windows' gives every agent its own ghostel buffer
-and lets Emacs own the layout; plain shell panes are then not
-represented, since herdr will not attach to a pane without an agent."
+the layout.  `agent-windows' gives every claimed pane its own ghostel
+buffer and lets Emacs own the layout.  A claimed pane has an agent, or
+was adopted locally.  Plain shells nobody asked for are not represented."
   :type '(choice (const :tag "One buffer running the herdr TUI" session)
                  (const :tag "One buffer per agent" agent-windows))
   :group 'herdr)
@@ -94,13 +97,24 @@ the old behaviour of taking the whole frame:
 (defun herdr-term-agent-buffer-name (pane)
   "Return the buffer name for PANE under the `agent-windows' backend."
   (format "*herdr: %s %s*"
-          (or (alist-get 'agent pane) "agent")
+          (or (alist-get 'agent pane) "shell")
           (alist-get 'pane_id pane)))
 
-(defun herdr-term-attach-args (pane-id takeover)
-  "Return argv tail for attaching to PANE-ID, stealing it when TAKEOVER."
-  (append (list "agent" "attach" pane-id)
-          (when takeover '("--takeover"))))
+(defun herdr-term-attach-args (pane takeover)
+  "Return argv tail for attaching to PANE, stealing it when TAKEOVER.
+PANE is a pane alist or a pane id.  herdr 0.9.2 attaches a plain shell
+with `terminal attach' on its terminal id.  `agent attach' remains the
+fallback for a pane that has no terminal id."
+  (let* ((pane (if (stringp pane)
+                   (or (herdr-state-pane (herdr-state-current) pane)
+                       `((pane_id . ,pane)))
+                 pane))
+         (pane-id (alist-get 'pane_id pane))
+         (terminal (alist-get 'terminal_id pane)))
+    (append (if (and terminal (not (string-empty-p terminal)))
+                (list "terminal" "attach" terminal)
+              (list "agent" "attach" pane-id))
+            (when takeover '("--takeover")))))
 
 (defun herdr-term-session-args ()
   "Return argv tail for the session client, which takes no arguments."
@@ -189,10 +203,13 @@ Returns the buffer when it showed one."
       buffer)))
 
 (defun herdr-term--attach-if-possible (pane-id)
-  "Attach to PANE-ID now, if this backend attaches and herdr will allow it."
+  "Attach to PANE-ID now, if this backend attaches and the pane is claimed.
+A claimed pane has an agent, or was adopted locally.  herdr 0.9.2 will
+attach to either through its terminal id."
   (when (eq herdr-terminal-backend 'agent-windows)
     (when-let* ((pane (herdr-state-pane (herdr-state-current) pane-id))
-                ((alist-get 'agent pane)))
+                ((or (alist-get 'agent pane)
+                     (herdr-state-adopted-p pane))))
       (herdr-term--attach pane))))
 
 (defun herdr-term-select-focused ()
@@ -247,13 +264,13 @@ steals the first one's terminal."
     (herdr-term--show buffer)
     (condition-case err
         (ghostel-exec buffer herdr-executable
-                      (herdr-term-attach-args pane-id nil))
+                      (herdr-term-attach-args pane nil))
       (error
        (if (and (y-or-n-p
                  (format "Attaching to %s failed (%s).  Take it over? "
                          pane-id (error-message-string err))))
            (ghostel-exec buffer herdr-executable
-                         (herdr-term-attach-args pane-id t))
+                         (herdr-term-attach-args pane t))
          (kill-buffer buffer)
          (setq buffer nil))))
     (when buffer

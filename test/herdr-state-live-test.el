@@ -296,33 +296,19 @@ even while another source holds the pane's agent label."
       (lambda (req) (cons (herdr-test-err req "agent_not_found" "nope") nil))
     (should-not (herdr-state-detected-agent "w1:p1"))))
 
-(ert-deftest herdr-state-promotes-an-adopted-shell-running-an-agent ()
-  "Adoption suppresses detection, so a shell that later starts Claude
-would stay labelled `shell' forever without this."
-  (let (reported)
+(ert-deftest herdr-state-releases-a-legacy-shell-label ()
+  "A leftover `shell' label hides detection.  Remember the pane, then
+release the label.  Do not report another agent."
+  (let ((herdr-adopted-panes-file nil)
+        (herdr-adopted-pane-ids nil)
+        (reported nil)
+        released)
     (herdr-test-with-server
         (lambda (req)
           (pcase (alist-get 'method req)
-            ("agent.explain"
-             (cons (herdr-test-ok req '((explain . ((agent . "claude"))))) nil))
-            ("pane.report_agent"
-             (setq reported (alist-get 'params req))
+            ("pane.release_agent"
+             (setq released (alist-get 'params req))
              (cons (herdr-test-ok req '((type . "ok"))) nil))
-            (_ (cons (herdr-test-ok req '((type . "ok"))) nil))))
-      (let ((herdr-state--current
-             (herdr-state-from-snapshot
-              '((panes . (((pane_id . "w1:p1") (agent . "shell"))))))))
-        (should (herdr-state-promote-shell-panes))
-        (should (equal "claude" (alist-get 'agent reported)))
-        (should (equal "w1:p1" (alist-get 'pane_id reported)))))))
-
-(ert-deftest herdr-state-does-not-promote-a-shell-with-no-agent ()
-  (let (reported)
-    (herdr-test-with-server
-        (lambda (req)
-          (pcase (alist-get 'method req)
-            ("agent.explain"
-             (cons (herdr-test-err req "agent_not_found" "none") nil))
             ("pane.report_agent"
              (setq reported t)
              (cons (herdr-test-ok req '((type . "ok"))) nil))
@@ -330,22 +316,61 @@ would stay labelled `shell' forever without this."
       (let ((herdr-state--current
              (herdr-state-from-snapshot
               '((panes . (((pane_id . "w1:p1") (agent . "shell"))))))))
-        (should-not (herdr-state-promote-shell-panes))
-        (should-not reported)))))
+        (should (herdr-state-promote-shell-panes))
+        (should-not reported)
+        (should (equal "shell" (alist-get 'agent released)))
+        (should (equal "herdr.el" (alist-get 'source released)))
+        (should (equal "w1:p1" (alist-get 'pane_id released)))
+        (should (equal '("w1:p1") herdr-adopted-pane-ids))))))
 
-(ert-deftest herdr-state-does-not-touch-real-agents ()
-  "Only adopted shells are candidates; a real agent must be left alone."
-  (let (reported)
+(ert-deftest herdr-state-does-not-release-a-plain-shell ()
+  "A pane with no agent was never labelled."
+  (let ((herdr-adopted-panes-file nil)
+        (herdr-adopted-pane-ids nil)
+        called)
     (herdr-test-with-server
         (lambda (req)
-          (when (equal (alist-get 'method req) "pane.report_agent")
-            (setq reported t))
+          (setq called t)
+          (cons (herdr-test-ok req '((type . "ok"))) nil))
+      (let ((herdr-state--current
+             (herdr-state-from-snapshot
+              '((panes . (((pane_id . "w1:p1") (agent . nil))))))))
+        (should-not (herdr-state-promote-shell-panes))
+        (should-not called)
+        (should-not herdr-adopted-pane-ids)))))
+
+(ert-deftest herdr-state-does-not-touch-real-agents ()
+  "Only a leftover shell label is released; a real agent is left alone."
+  (let ((herdr-adopted-panes-file nil)
+        (herdr-adopted-pane-ids nil)
+        touched)
+    (herdr-test-with-server
+        (lambda (req)
+          (when (member (alist-get 'method req)
+                        '("pane.report_agent" "pane.release_agent"))
+            (setq touched t))
           (cons (herdr-test-ok req '((type . "ok"))) nil))
       (let ((herdr-state--current
              (herdr-state-from-snapshot
               '((panes . (((pane_id . "w1:p1") (agent . "claude"))))))))
         (should-not (herdr-state-promote-shell-panes))
-        (should-not reported)))))
+        (should-not touched)
+        (should-not herdr-adopted-pane-ids)))))
+
+(ert-deftest herdr-state-reconcile-forgets-adopted-panes-that-closed ()
+  "An adopted id that this server has shown and then closed is dropped.
+An id never present in the cache may belong to another session."
+  (let ((herdr-adopted-panes-file nil)
+        (herdr-adopted-pane-ids '("w1:p1" "w9:p9")))
+    (herdr-test-with-server
+        (herdr-state-live-test--pane-list-server
+         [((pane_id . "w1:p2") (cwd . "/tmp"))])
+      (let ((herdr-state--current
+             (herdr-state-from-snapshot
+              '((panes . (((pane_id . "w1:p1") (cwd . "/tmp"))
+                          ((pane_id . "w1:p2") (cwd . "/tmp"))))))))
+        (should (herdr-state-reconcile-panes))
+        (should (equal '("w9:p9") herdr-adopted-pane-ids))))))
 
 (ert-deftest herdr-state-reconcile-refreshes-a-changed-agent-label ()
   "A shell promoted to a real agent must not keep its old label.

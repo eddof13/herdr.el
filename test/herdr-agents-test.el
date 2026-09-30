@@ -65,7 +65,29 @@
                  (herdr-agents--segment
                   (herdr-agents-test--state
                    '("w1:p1" "claude" "blocked")
-                   '("w1:p2" "shell" "blocked"))))))
+                   '("w1:p2" "shell" "blocked")))))
+  (let ((herdr-adopted-pane-ids '("w1:p2"))
+        (herdr-adopted-panes-file nil))
+    (should (equal "herdr:1⏸"
+                   (herdr-agents--segment
+                    (herdr-agents-test--state
+                     '("w1:p1" "claude" "blocked")
+                     '("w1:p2" nil "blocked")))))))
+
+(ert-deftest herdr-agents-tree-notes-a-restore-error ()
+  (with-temp-buffer
+    (herdr-agents--insert-tree
+     (herdr-state-from-snapshot
+      '((workspaces . (((workspace_id . "w1") (label . "web"))))
+        (panes . (((pane_id . "w1:p1") (agent . "claude")
+                   (agent_status . "idle") (workspace_id . "w1")
+                   (restore_error . "cwd missing")))))))
+    (should (string-match-p "restore failed: cwd missing" (buffer-string)))
+    (goto-char (point-min))
+    (forward-line 1)
+    (should (equal "w1:p1"
+                   (get-text-property (line-beginning-position)
+                                      'herdr-pane-id)))))
 
 ;;; Mode line wiring
 

@@ -20,9 +20,11 @@
 (ert-deftest herdr-schema-exposes-every-method ()
   (herdr-schema-test-with-fixture
     (let ((methods (herdr-schema-methods)))
-      (should (= (length methods) 103))
+      (should (= (length methods) 102))
       (should (member "ping" methods))
       (should (member "pane.read" methods))
+      (should (member "pane.clear" methods))
+      (should-not (member "pane.graphics.info" methods))
       (should (member "events.subscribe" methods))
       (should (member "plugin.action.invoke" methods))
       (should (member "workspace.move_block" methods))

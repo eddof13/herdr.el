@@ -29,7 +29,10 @@
 ;; history, so the stream is opened before `session.snapshot' and events
 ;; that arrive while the snapshot is in flight are buffered and applied
 ;; afterwards.  Events missed during a disconnect still cannot be
-;; recovered, so every reconnect repeats that bootstrap.
+;; recovered, so every reconnect repeats that bootstrap.  herdr 0.9.2
+;; closes a stream that falls behind with `events_lost' instead of
+;; skipping; that is treated as a disconnect, and the reconnect backoff
+;; is reset so the resync is not postponed by an earlier failure.
 
 ;;; Code:
 
@@ -95,24 +98,83 @@ is \"resync\" and DATA is nil.")
             (herdr-state-panes state)))
 
 (defcustom herdr-shell-agent-name "shell"
-  "Agent name reported for shell panes adopted by `herdr-adopt-shell'.
+  "Legacy label `herdr-adopt-shell' used to report before herdr 0.9.2.
 
-herdr will only attach to a pane that has a reported agent, so adopting
-a plain shell means reporting one.  Panes carrying this name are treated
-as terminals rather than agents: they get a buffer, but they are kept
-out of the modeline count, the agent picker, and notifications, because
-a shell has no lifecycle worth reporting on."
+herdr 0.9.2 clears a self-reported agent once the pane is back at an
+idle shell, so a label can no longer mark a shell.  A pane that still
+wears this name is a leftover from an older herdr.el: it is treated as
+a shell, not an agent, and `herdr-promote-shell' releases it."
   :type 'string
   :group 'herdr)
 
+(defcustom herdr-adopted-panes-file
+  (expand-file-name "herdr/adopted-panes" user-emacs-directory)
+  "File remembering pane ids adopted for an Emacs buffer.
+One id per line.  Adoption is local because herdr 0.9.2 will not keep a
+self-reported shell label.  Set to nil to keep the list in memory only."
+  :type '(choice file (const :tag "Do not persist" nil))
+  :group 'herdr)
+
+(defvar herdr-adopted-pane-ids nil
+  "Pane ids herdr.el has claimed a buffer for, under `agent-windows'.")
+
+(defun herdr-state-adopted-p (pane-or-id)
+  "Return non-nil when PANE-OR-ID is in `herdr-adopted-pane-ids'."
+  (let ((id (if (stringp pane-or-id)
+                pane-or-id
+              (alist-get 'pane_id pane-or-id))))
+    (and id (member id herdr-adopted-pane-ids))))
+
+(defun herdr-state-load-adopted-panes ()
+  "Load `herdr-adopted-pane-ids' from `herdr-adopted-panes-file'."
+  (setq herdr-adopted-pane-ids
+        (when (and herdr-adopted-panes-file
+                   (file-readable-p herdr-adopted-panes-file))
+          (with-temp-buffer
+            (insert-file-contents herdr-adopted-panes-file)
+            (split-string (buffer-string) "\n" t "[[:space:]]*"))))
+  herdr-adopted-pane-ids)
+
+(defun herdr-state-save-adopted-panes ()
+  "Write `herdr-adopted-pane-ids' to `herdr-adopted-panes-file'."
+  (when herdr-adopted-panes-file
+    (let ((dir (file-name-directory herdr-adopted-panes-file)))
+      (when dir (make-directory dir t))
+      (with-temp-file herdr-adopted-panes-file
+        (when herdr-adopted-pane-ids
+          (insert (string-join herdr-adopted-pane-ids "\n") "\n"))))))
+
+(defun herdr-state-adopt-pane (pane-id)
+  "Remember PANE-ID as adopted and persist the list.  Return PANE-ID."
+  (unless (member pane-id herdr-adopted-pane-ids)
+    (setq herdr-adopted-pane-ids
+          (append herdr-adopted-pane-ids (list pane-id)))
+    (herdr-state-save-adopted-panes))
+  pane-id)
+
+(defun herdr-state-unadopt-pane (pane-id)
+  "Forget PANE-ID and persist the list."
+  (when (member pane-id herdr-adopted-pane-ids)
+    (setq herdr-adopted-pane-ids
+          (seq-remove (lambda (id) (equal id pane-id))
+                      herdr-adopted-pane-ids))
+    (herdr-state-save-adopted-panes)))
+
 (defun herdr-state-shell-pane-p (pane)
-  "Return non-nil when PANE is a shell adopted via `herdr-shell-agent-name'."
-  (equal (alist-get 'agent pane) herdr-shell-agent-name))
+  "Return non-nil when PANE is an adopted shell rather than an agent.
+Either it wears the legacy `herdr-shell-agent-name', or it has no agent
+and was adopted locally."
+  (or (equal (alist-get 'agent pane) herdr-shell-agent-name)
+      (and (not (alist-get 'agent pane))
+           (herdr-state-adopted-p pane))))
 
 (defun herdr-state-attachable (state)
-  "Return the panes in STATE that herdr will let a client attach to.
-That is every pane with a reported agent, adopted shells included."
-  (seq-filter (lambda (pane) (alist-get 'agent pane))
+  "Return the panes in STATE a client can attach to.
+Every pane has a terminal, so this is every pane with an agent plus
+every pane adopted locally.  Plain shells nobody asked for stay out."
+  (seq-filter (lambda (pane)
+                (or (alist-get 'agent pane)
+                    (herdr-state-adopted-p pane)))
               (herdr-state-panes state)))
 
 (defun herdr-state-agents (state)
@@ -385,6 +447,9 @@ snapshot is installed.")
 (defvar herdr-state--reconnect-timer nil)
 (defvar herdr-state--resubscribe-timer nil)
 (defvar herdr-state--running nil)
+(defvar herdr-state--resync-now nil
+  "Non-nil when the next reconnect should not inherit the backoff.
+Set when the server closes a stream with `events_lost'.")
 
 (defun herdr-state-current ()
   "Return the live cache."
@@ -408,7 +473,8 @@ Callers announce once after this returns."
   "Handle one NDJSON LINE from an event connection."
   (let ((payload (ignore-errors (herdr-rpc-decode line))))
     (when payload
-      (let ((kind (alist-get 'event payload)))
+      (let ((kind (alist-get 'event payload))
+            (err (alist-get 'error payload)))
         (cond
          ;; The subscription ack is not an event; dispatching it would
          ;; reduce against a kind nothing understands.  It does end the
@@ -417,6 +483,11 @@ Callers announce once after this returns."
          ((and (null kind) (alist-get 'result payload))
           (when (eq herdr-state--bootstrapping 'wait-ack)
             (setq herdr-state--bootstrapping 'buffer)))
+         ;; herdr 0.9.2 writes this and then closes the socket when a
+         ;; reader falls behind retained history.  The close reconnects;
+         ;; the flag keeps that reconnect from sitting out a long backoff
+         ;; built up by earlier failures.
+         (err (setq herdr-state--resync-now t))
          ((null kind) nil)
          (herdr-state--bootstrapping
           (push (cons kind (alist-get 'data payload))
@@ -449,6 +520,9 @@ every subsequent event."
   (when (and herdr-state--running
              (not (process-get proc 'herdr-intentional))
              (memq (process-status proc) '(closed failed exit signal)))
+    (when herdr-state--resync-now
+      (setq herdr-state--resync-now nil
+            herdr-state--reconnect-delay nil))
     (herdr-state--schedule-reconnect)))
 
 (defun herdr-state--subscribe (name subscriptions)
@@ -585,37 +659,26 @@ source holds the label."
     (alist-get 'agent explain)))
 
 (defun herdr-state-promote-shell-panes ()
-  "Relabel adopted shells in which a real agent has since started.
+  "Release legacy shell labels so herdr's own detection can run.
 
-Adopting a pane means reporting an agent for it, and reporting takes
-lifecycle authority — which suppresses herdr's own detection for that
-pane.  So starting Claude in an adopted shell leaves it labelled
-`herdr-shell-agent-name' forever, and it never appears as an agent.
-
-Releasing authority does not help: detection binds when an agent starts
-and does not re-run, so a released pane goes to no agent at all rather
-than to the one that is plainly running.
-
-What does work is reading the detector's own conclusion through
-`agent.explain', which remains available while we hold the label, and
-re-reporting under that name.  Returns non-nil if anything was promoted."
-  (let ((promoted nil))
+herdr 0.9.2 clears a self-reported agent once the pane is an idle shell,
+and while the label is held it outranks detection.  Re-reporting the
+detected name took that authority again.  Adopting no longer reports a
+label.  A pane that still wears `herdr-shell-agent-name' is remembered
+locally, then released.  Returns non-nil if anything was released."
+  (let ((released nil))
     (dolist (pane (herdr-state-panes herdr-state--current))
-      (when (herdr-state-shell-pane-p pane)
-        (let* ((id (alist-get 'pane_id pane))
-               (detected (herdr-state-detected-agent id)))
-          (when (and detected
-                     (not (equal detected herdr-shell-agent-name)))
-            (ignore-errors
-              (herdr-rpc-call "pane.report_agent"
-                              `((pane_id . ,id)
-                                (source . "herdr.el")
-                                (agent . ,detected)
-                                (state . "idle")))
-              (setq promoted t)
-              (message "herdr: %s is running %s; promoted from %s"
-                       id detected herdr-shell-agent-name))))))
-    promoted))
+      (when (equal (alist-get 'agent pane) herdr-shell-agent-name)
+        (let ((id (alist-get 'pane_id pane)))
+          (herdr-state-adopt-pane id)
+          (ignore-errors
+            (herdr-rpc-call "pane.release_agent"
+                            `((pane_id . ,id)
+                              (source . "herdr.el")
+                              (agent . ,herdr-shell-agent-name)))
+            (setq released t)
+            (message "herdr: released the legacy shell label on %s" id)))))
+    released))
 
 (defconst herdr-state-pane-significant-fields
   '(agent agent_status cwd foreground_cwd workspace_id tab_id
@@ -657,6 +720,17 @@ are refreshed in the same pass.  Returns non-nil when anything changed."
         (setq herdr-state--current
               (herdr-state-reduce herdr-state--current "pane_closed"
                                   `((pane_id . ,id)))))
+      ;; Drop adopted ids only once this server has shown us the pane and
+      ;; then closed it.  An id that was never in the cache may belong to
+      ;; another session and must survive a poll here.
+      (let ((forgotten nil))
+        (dolist (id (copy-sequence herdr-adopted-pane-ids))
+          (when (and (member id cached-ids) (not (member id live-ids)))
+            (setq herdr-adopted-pane-ids
+                  (seq-remove (lambda (known) (equal known id))
+                              herdr-adopted-pane-ids)
+                  forgotten t)))
+        (when forgotten (herdr-state-save-adopted-panes)))
       (dolist (pane panes)
         (let* ((id (alist-get 'pane_id pane))
                (known (herdr-state-pane herdr-state--current id)))
@@ -709,6 +783,7 @@ round trip."
 (defun herdr-state-start ()
   "Hydrate the cache and begin following the event stream."
   (unless herdr-state--running
+    (herdr-state-load-adopted-panes)
     (setq herdr-state--running t)
     (add-hook 'herdr-state-change-hook #'herdr-state--note-pane-set-change)
     (condition-case err
@@ -734,6 +809,7 @@ round trip."
         herdr-state--bootstrapping nil
         herdr-state--event-buffer nil
         herdr-state--reconnect-delay nil
+        herdr-state--resync-now nil
         herdr-state--current (herdr-state-empty)))
 
 (defun herdr-state-running-p ()
