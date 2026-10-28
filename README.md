@@ -42,7 +42,7 @@ ideas. Asserted by tests, not just by review.
 ## Requirements
 
 - Emacs 28.1+
-- [herdr](https://herdr.dev) 0.9.3 (protocol 22). 0.9.2 is the release that changed adoption; 0.9.3 is the same-day fix this package was tested against.
+- [herdr](https://herdr.dev) 0.9.5 (protocol 22). 0.9.2 is the release that changed adoption; 0.9.3 and later work the same. 0.9.4 and 0.9.5 ship a byte-identical API schema to 0.9.3, and this package is tested against 0.9.5.
 - `ghostel`, `transient`
 
 Optional, used when present, never required: `marginalia`, `embark`, `consult`, `alert`.
@@ -164,7 +164,7 @@ Recorded here because most of it is not written down anywhere else.
 | `agent attach` | Streams one pane full-screen; coexists with a session client; **exclusive per pane**; refuses panes without a detected agent. |
 | Attach needs a window | The client needs a window when it starts and dies if that window is *deleted*; being merely hidden is fine, so a buried terminal keeps running with its scrollback. A zero-sized PTY renders nothing. |
 | **Cache can still drift** | A disconnect gap, or a `cd` that never emits `pane_updated`, leaves the cache wrong. The pane set is reconciled against `pane.list` on a poll. |
-| **Self-reported agents clear** | On herdr 0.9.3, `pane.report_agent` of an unknown label (`shell`, state `idle` or `working`, with or without `resume_argv`) is gone from `pane.get` within about a second while the pane is an idle shell. A known label such as `maki` or `claude` sticks, and `agent.explain` then reports that label rather than the process in the pane. |
+| **Self-reported agents clear** | On herdr 0.9.3, and again on 0.9.5, `pane.report_agent` of an unknown label (`shell`, state `idle` or `working`, with or without `resume_argv`) is gone from `pane.get` within about a second while the pane is an idle shell. A known label such as `maki` or `claude` sticks, and `agent.explain` then reports that label rather than the process in the pane. |
 | Focus | `pane.focus` sets the session's focused pane. Viewing clients can present different workspaces and tabs independently; `pane.focused` reports a selection without moving other clients' views. |
 | OSC | **Not** forwarded — herdr's VT consumes OSC 7 and OSC 133. Beware the false positive: sending the escapes inline makes the shell echo the command text, which contains the same characters. |
 | cwd tracking | herdr tracks it **itself** — `pane.cwd` follows a `cd` within about a second. But it publishes **no event** for it: a `cd` emits only `layout_updated` noise, so directory tracking has to poll (debounced off the event stream, with a slow backstop timer). |
@@ -176,6 +176,8 @@ Recorded here because most of it is not written down anywhere else.
 | `pane.clear` | herdr 0.9.2. Clears scrollback and keeps the prompt. `pane.graphics.info`, `pane.graphics.set` and `pane.graphics.clear` are `unknown_method`. The schema has **102** request methods; protocol is still 22. |
 | `events_lost` | A subscription that falls behind receives an error line (`code` `events_lost`) and then the socket closes. The client resubscribes and takes a fresh snapshot. The reconnect backoff is reset so that resync is not postponed by an earlier failure. |
 | `restore_error` | `PaneInfo` may carry a string when herdr could not restore the pane. The agents tree prints it. |
+| Server lifetime | herdr 0.9.4. On Linux and macOS, a `SIGHUP` to the client that started the server no longer stops the server. Killing the bootstrap buffer under `agent-windows` leaves the server running, as before. Stop it with `herdr server stop`. |
+| 0.9.4 / 0.9.5 | `herdr api schema --json` is byte-identical to 0.9.3: same 102 methods, same params, protocol 22. An out-of-range workspace returns `workspace_not_found` instead of crashing the server. |
 
 ## Commands
 
@@ -270,8 +272,8 @@ run it in a real frame as well.
 
 ## Design notes
 
-This README is the current contract, including the herdr 0.9.2/0.9.3 measurements above. The
-design write-up records the original shape of the package:
+This README is the current contract, including the herdr 0.9.2/0.9.3 measurements above,
+rechecked on 0.9.5. The design write-up records the original shape of the package:
 [`docs/superpowers/specs/2026-08-01-herdr-el-design.md`](docs/superpowers/specs/2026-08-01-herdr-el-design.md).
 
 ## License
