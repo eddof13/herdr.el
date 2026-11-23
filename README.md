@@ -43,7 +43,7 @@ ideas. Asserted by tests, not just by review.
 
 - Emacs 28.1+
 - [herdr](https://herdr.dev) 0.9.5 (protocol 22). 0.9.2 is the release that changed adoption; 0.9.3 and later work the same. 0.9.4 and 0.9.5 ship a byte-identical API schema to 0.9.3, and this package is tested against 0.9.5.
-- `ghostel`, `transient`
+- `ghostel` 0.59.0+ (the first release whose `ghostel-exit-functions` reports a child's exit code on the native PTY, which the attach-takeover prompt needs; older ghostel works but never prompts), `transient`
 
 Optional, used when present, never required: `marginalia`, `embark`, `consult`, `alert`.
 
@@ -162,6 +162,7 @@ Recorded here because most of it is not written down anywhere else.
 | **`pane_updated` coalesces** | Driving a pane through working → blocked → idle produced **3** per-pane events but only **1** `pane_updated`. Global events alone silently lose status transitions, so per-pane `pane.agent_status_changed` subscriptions are required. |
 | Throughput | Not a concern for either backend. A **12.2 MB** pane dump reached Emacs as **17 KB** (`session`) / **24 KB** (`agent-windows`), completing in 0.2s. herdr's VT only emits visible-frame diffs. |
 | `agent attach` | Streams one pane full-screen; coexists with a session client; **exclusive per pane**; refuses panes without a detected agent. |
+| **Refused attach** | herdr 0.9.5: a second `terminal attach` to a held pane prints `terminal attach failed: … already has an attached client; retry with --takeover` and exits **rc=1** about 0.25 s later. `ghostel-exec` has long returned by then, so the takeover prompt hangs off `ghostel-exit-functions` (`"exited abnormally with code 1"` from ghostel 0.59.0) rather than an Elisp error. The client it steals from exits with `terminal attach taken over`. |
 | Attach needs a window | The client needs a window when it starts and dies if that window is *deleted*; being merely hidden is fine, so a buried terminal keeps running with its scrollback. A zero-sized PTY renders nothing. |
 | **Cache can still drift** | A disconnect gap, or a `cd` that never emits `pane_updated`, leaves the cache wrong. The pane set is reconciled against `pane.list` on a poll. |
 | **Self-reported agents clear** | On herdr 0.9.3, and again on 0.9.5, `pane.report_agent` of an unknown label (`shell`, state `idle` or `working`, with or without `resume_argv`) is gone from `pane.get` within about a second while the pane is an idle shell. A known label such as `maki` or `claude` sticks, and `agent.explain` then reports that label rather than the process in the pane. |

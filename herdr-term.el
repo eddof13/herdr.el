@@ -5,7 +5,7 @@
 ;; Author: Eddie Jesinsky
 ;; Keywords: processes, terminals, tools
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Package-Requires: ((emacs "28.1") (ghostel "0"))
+;; Package-Requires: ((emacs "28.1") (ghostel "0.59.0"))
 
 ;;; Commentary:
 
@@ -34,7 +34,11 @@
 ;;   refuses a pane with no agent, which is why an unadopted shell gets
 ;;   no buffer.
 ;; - Attachment is exclusive per pane, so a second attach needs
-;;   `--takeover'.  We ask first rather than stealing.
+;;   `--takeover'.  We ask first rather than stealing.  The refusal is
+;;   not an Elisp error: `ghostel-exec' returns at once and the client
+;;   exits with code 1 some 20-60 ms later, so the prompt hangs off
+;;   `ghostel-exit-functions', which reports that status on both PTY
+;;   backends from ghostel 0.59.0.
 ;; - The client paints nothing into a zero-sized PTY.  ghostel sizes its
 ;;   terminal from the displayed window, so buffers are displayed before
 ;;   the process starts.
@@ -48,6 +52,8 @@
 
 (declare-function ghostel-exec "ghostel" (buffer program &optional args))
 (declare-function ghostel-mode "ghostel" ())
+(defvar ghostel-exit-functions)
+(defvar ghostel-kill-buffer-on-exit)
 
 (defcustom herdr-terminal-backend 'session
   "How herdr's terminals are hosted inside Emacs.
@@ -251,8 +257,69 @@ steals the first one's terminal."
         existing
       (herdr-term--attach-1 pane pane-id))))
 
-(defun herdr-term--attach-1 (pane pane-id)
-  "Create and start a ghostel buffer attached to PANE, named for PANE-ID."
+(defcustom herdr-term-refusal-window 5.0
+  "Seconds after starting within which an attach failure is a refusal.
+
+herdr refuses a second attach to a held pane by exiting with code 1
+within tens of milliseconds.  A client that ran for longer and then
+exited with code 1 failed for some other reason, such as the server
+going away, and offering to take the pane over would be wrong."
+  :type 'number
+  :group 'herdr)
+
+(defvar-local herdr-term--attach-context nil
+  "Plist describing the attach client started in this buffer.
+Keys are :pane, :takeover and :started (a `float-time').")
+
+(defun herdr-term-refusal-p (event elapsed)
+  "Return non-nil when an exit EVENT after ELAPSED seconds is a refusal.
+
+EVENT is the string `ghostel-exit-functions' receives.  From ghostel
+0.59.0 both PTY backends report a refused attach as \"exited abnormally
+with code 1\", while a clean exit or detach is \"finished\".  Older
+ghostel reports \"finished\" for every exit on the native PTY, so no
+refusal is ever recognised there; that degrades to no prompt, never to
+a wrong one."
+  (and (stringp event)
+       (numberp elapsed)
+       (<= elapsed herdr-term-refusal-window)
+       (string-match-p "\\`exited abnormally with code 1\n?\\'" event)))
+
+(defun herdr-term--on-client-exit (buffer event)
+  "Offer a takeover when BUFFER's attach client was refused.
+Run from `ghostel-exit-functions' with the exit EVENT string."
+  (let ((context (and (buffer-live-p buffer)
+                      (buffer-local-value 'herdr-term--attach-context buffer))))
+    (when (and context
+               (not (plist-get context :takeover))
+               (herdr-term-refusal-p
+                event (- (float-time) (plist-get context :started))))
+      ;; ghostel kills BUFFER as soon as this hook returns (when
+      ;; `ghostel-kill-buffer-on-exit' is set), so a client restarted in
+      ;; it here would die with it.  Prompt once the sentinel is done.
+      (run-at-time 0 nil #'herdr-term--offer-takeover
+                   (plist-get context :pane) buffer))))
+
+(defun herdr-term--offer-takeover (pane old-buffer)
+  "Ask whether to steal PANE, whose attach in OLD-BUFFER was refused."
+  (let ((pane-id (alist-get 'pane_id pane)))
+    ;; With `ghostel-kill-buffer-on-exit' nil the refused buffer lingers;
+    ;; it holds no client, so clear it rather than leave a dead twin.
+    (when (buffer-live-p old-buffer)
+      (kill-buffer old-buffer))
+    (when (y-or-n-p
+           (format "Pane %s is already attached elsewhere.  Take it over? "
+                   pane-id))
+      (herdr-term--attach-1 pane pane-id t))))
+
+(defun herdr-term--attach-1 (pane pane-id &optional takeover)
+  "Create and start a ghostel buffer attached to PANE, named for PANE-ID.
+With TAKEOVER, steal the pane from any client already attached.
+
+A refused attach is not detected here: the client is asynchronous, so
+the refusal arrives as its exit status and `herdr-term--on-client-exit'
+asks about a takeover then.  An error signalled here is a failure to
+start the client at all, which a takeover would not cure."
   (let ((buffer (get-buffer-create (herdr-term-agent-buffer-name pane))))
     (with-current-buffer buffer (ghostel-mode))
     ;; The buffer needs a window when the client starts: attaching without
@@ -262,20 +329,18 @@ steals the first one's terminal."
     ;; window only has to exist, not persist.  Shown through
     ;; `herdr-display-action\=' like every other path.
     (herdr-term--show buffer)
+    (with-current-buffer buffer
+      (setq herdr-term--attach-context
+            (list :pane pane :takeover takeover :started (float-time)))
+      (add-hook 'ghostel-exit-functions #'herdr-term--on-client-exit nil t))
     (condition-case err
         (ghostel-exec buffer herdr-executable
-                      (herdr-term-attach-args pane nil))
+                      (herdr-term-attach-args pane takeover))
       (error
-       (if (and (y-or-n-p
-                 (format "Attaching to %s failed (%s).  Take it over? "
-                         pane-id (error-message-string err))))
-           (ghostel-exec buffer herdr-executable
-                         (herdr-term-attach-args pane t))
-         (kill-buffer buffer)
-         (setq buffer nil))))
-    (when buffer
-      (herdr-term--set-directory buffer pane)
-      (push (cons pane-id buffer) herdr-term--agent-buffers))
+       (kill-buffer buffer)
+       (signal (car err) (cdr err))))
+    (herdr-term--set-directory buffer pane)
+    (push (cons pane-id buffer) herdr-term--agent-buffers)
     buffer))
 
 (defun herdr-term--rename-stale-buffers ()
