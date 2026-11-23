@@ -4,10 +4,10 @@
 
 ;; Author: Eddie Jesinsky
 ;; URL: https://github.com/ejesinsky/herdr.el
-;; Version: 0.3.1
+;; Version: 0.3.2
 ;; Keywords: processes, terminals, tools
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Package-Requires: ((emacs "28.1") (transient "0.4.0") (ghostel "0"))
+;; Package-Requires: ((emacs "28.1") (transient "0.4.0") (ghostel "0.59.0"))
 
 ;; This file is not part of GNU Emacs.
 

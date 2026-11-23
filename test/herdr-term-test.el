@@ -92,6 +92,120 @@
   "The session backend runs bare herdr, which attaches the whole session."
   (should (equal nil (herdr-term-session-args))))
 
+;;; Refused attach and the takeover offer (issue #2)
+
+(ert-deftest herdr-term-refusal-p-recognises-exit-code-1 ()
+  "ghostel 0.59.0 reports a refused attach as exit code 1 on both PTYs."
+  (let ((herdr-term-refusal-window 5.0))
+    (should (herdr-term-refusal-p "exited abnormally with code 1\n" 0.06))
+    (should (herdr-term-refusal-p "exited abnormally with code 1" 0.06))))
+
+(ert-deftest herdr-term-refusal-p-ignores-other-exits ()
+  "A clean exit, a detach, other codes and signal deaths are not refusals."
+  (let ((herdr-term-refusal-window 5.0))
+    (should-not (herdr-term-refusal-p "finished\n" 0.06))
+    (should-not (herdr-term-refusal-p "exited abnormally with code 12\n" 0.06))
+    (should-not (herdr-term-refusal-p "exited abnormally with code 143\n" 0.06))
+    (should-not (herdr-term-refusal-p "terminated: 15\n" 0.06))
+    (should-not (herdr-term-refusal-p nil 0.06))))
+
+(ert-deftest herdr-term-refusal-p-ignores-a-late-failure ()
+  "A client that ran for a while and then failed was not refused."
+  (let ((herdr-term-refusal-window 5.0))
+    (should-not (herdr-term-refusal-p "exited abnormally with code 1\n" 3600.0))))
+
+(defmacro herdr-term-test--with-fake-ghostel (calls &rest body)
+  "Run BODY with ghostel stubbed, collecting `ghostel-exec' argv in CALLS."
+  (declare (indent 1))
+  `(let ((,calls nil)
+         (herdr-terminal-backend 'agent-windows)
+         (herdr-term--agent-buffers nil)
+         (herdr-term-track-directory nil))
+     (cl-letf (((symbol-function 'ghostel-mode) #'ignore)
+               ((symbol-function 'herdr-term--show) #'ignore)
+               ((symbol-function 'herdr-term--set-directory) #'ignore)
+               ((symbol-function 'ghostel-exec)
+                (lambda (buffer _program args)
+                  (push (cons buffer args) ,calls))))
+       (unwind-protect (progn ,@body)
+         (dolist (cell herdr-term--agent-buffers)
+           (when (buffer-live-p (cdr cell)) (kill-buffer (cdr cell))))))))
+
+(ert-deftest herdr-term-attach-hooks-the-client-exit ()
+  "The refusal is only visible at exit, so attaching must hook it."
+  (herdr-term-test--with-fake-ghostel calls
+    (let* ((pane (herdr-term-test--pane "w1:p1" "claude"))
+           (buffer (herdr-term--attach-1 pane "w1:p1")))
+      (should (equal '("agent" "attach" "w1:p1") (cdar calls)))
+      (with-current-buffer buffer
+        (should (memq #'herdr-term--on-client-exit ghostel-exit-functions))
+        (should (equal pane (plist-get herdr-term--attach-context :pane)))
+        (should-not (plist-get herdr-term--attach-context :takeover))))))
+
+(ert-deftest herdr-term-attach-start-failure-does-not-offer-a-takeover ()
+  "An error from `ghostel-exec' is not a refusal; it propagates unprompted."
+  (herdr-term-test--with-fake-ghostel calls
+    (let ((prompted nil))
+      (cl-letf (((symbol-function 'ghostel-exec)
+                 (lambda (&rest _) (error "Searching for program")))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (setq prompted t))))
+        (should-error (herdr-term--attach-1
+                       (herdr-term-test--pane "w1:p1" "claude") "w1:p1"))
+        (should-not prompted)
+        (should-not (get-buffer (herdr-term-agent-buffer-name
+                                 (herdr-term-test--pane "w1:p1" "claude"))))))))
+
+(ert-deftest herdr-term-refused-exit-schedules-the-offer ()
+  "A refusal defers the prompt until ghostel's sentinel has finished."
+  (with-temp-buffer
+    (setq herdr-term--attach-context
+          (list :pane '((pane_id . "w1:p1")) :takeover nil
+                :started (float-time)))
+    (let ((scheduled nil))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_time _repeat fn &rest args)
+                   (push (cons fn args) scheduled))))
+        (herdr-term--on-client-exit (current-buffer) "finished\n")
+        (should-not scheduled)
+        (herdr-term--on-client-exit (current-buffer)
+                                    "exited abnormally with code 1\n")
+        (should (eq #'herdr-term--offer-takeover (caar scheduled)))))))
+
+(ert-deftest herdr-term-refused-takeover-is-not-offered-again ()
+  "A takeover client that fails must not prompt to take over again."
+  (with-temp-buffer
+    (setq herdr-term--attach-context
+          (list :pane '((pane_id . "w1:p1")) :takeover t
+                :started (float-time)))
+    (let ((scheduled nil))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (&rest args) (push args scheduled))))
+        (herdr-term--on-client-exit (current-buffer)
+                                    "exited abnormally with code 1\n")
+        (should-not scheduled)))))
+
+(ert-deftest herdr-term-accepted-offer-reattaches-with-takeover ()
+  "Saying yes replaces the dead buffer with a `--takeover' client."
+  (herdr-term-test--with-fake-ghostel calls
+    (let* ((pane (herdr-term-test--pane "w1:p1" "claude"))
+           (old (generate-new-buffer "refused")))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+        (herdr-term--offer-takeover pane old))
+      (should-not (buffer-live-p old))
+      (should (equal '("agent" "attach" "w1:p1" "--takeover") (cdar calls)))
+      (should (buffer-live-p (herdr-term-buffer-for-pane "w1:p1"))))))
+
+(ert-deftest herdr-term-declined-offer-steals-nothing ()
+  "Saying no starts no client.  Never steal silently."
+  (herdr-term-test--with-fake-ghostel calls
+    (let ((old (generate-new-buffer "refused")))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+        (herdr-term--offer-takeover (herdr-term-test--pane "w1:p1" "claude")
+                                    old))
+      (should-not (buffer-live-p old))
+      (should-not calls))))
+
 ;;; Adopted shells and directory tracking
 
 (ert-deftest herdr-term-reconcile-creates-a-buffer-for-an-adopted-shell ()

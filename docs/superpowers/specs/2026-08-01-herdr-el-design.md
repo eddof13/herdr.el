@@ -134,7 +134,7 @@ Established by probing a live herdr and by the published socket-API schema, not 
 |---|---|
 | Streams a single pane full-screen? | **Yes.** Enters altscreen (`?1049h`), enables mouse tracking (1000/1002/1003/1006), clears and drives its own render loop. Exactly the stream a ghostel buffer wants. |
 | Coexists with a session-level client? | **Yes.** Attaching to a pane while a session client was attached worked and left session state unchanged. |
-| Two attaches to the *same* pane? | **No.** Exclusive — the second exits rc=1 with no output. This matches the intended one-buffer-per-pane model; `--takeover` exists for stealing. |
+| Two attaches to the *same* pane? | **No.** Exclusive — the second exits rc=1. (Originally recorded as "with no output"; from herdr 0.9.0 the client prints `terminal attach failed: … already has an attached client; retry with --takeover`. The exit is asynchronous, so the takeover prompt is driven from ghostel's exit hook.) This matches the intended one-buffer-per-pane model; `--takeover` exists for stealing. |
 | Plain shell pane (no detected agent)? | **No.** Returns `{"error":{"code":"agent_not_found"}}`. Only detected agents are attachable. |
 | Agents survive the client exiting? | **Yes.** Server is a daemon (`detached_server_daemon: true`). |
 | Does `pane.report_agent` make a shell pane attachable? | **Yes.** Reporting any agent name on a plain shell pane makes `agent attach` accept it, and the resulting ghostel buffer renders and updates live. Verified twice. |
